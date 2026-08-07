@@ -13,6 +13,7 @@ import base64
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -32,8 +33,10 @@ import word_style_transfer as core
 PACK_SCHEMA_VERSION = 1
 PACK_SUFFIX = ".wfstyle"
 PART_PREFIX = "parts/"
+MAX_PACK_MEMBERS = 256
 MAX_PACK_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_PACK_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_EDITS_JSON_BYTES = 1024 * 1024
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 A = {"a": A_NS}
 
@@ -254,14 +257,33 @@ def _style_preview(
     table_fill: Optional[str] = None
     table_accent: Optional[str] = None
     if style_node is not None and style_type == "table":
-        for shd in style_node.xpath(".//w:shd", namespaces=core.NS):
-            table_fill = _safe_hex(shd.get(core.qn(core.W_NS, "fill")))
-            if table_fill:
-                break
-        for color in style_node.xpath(".//w:color", namespaces=core.NS):
-            table_accent = _safe_hex(color.get(core.qn(core.W_NS, "val")))
-            if table_accent:
-                break
+        base_fill = style_node.find("w:tblPr/w:shd", namespaces=core.NS)
+        if base_fill is not None:
+            table_fill = _safe_hex(
+                base_fill.get(core.qn(core.W_NS, "fill"))
+            )
+        if table_fill is None:
+            for shd in style_node.xpath(".//w:shd", namespaces=core.NS):
+                table_fill = _safe_hex(shd.get(core.qn(core.W_NS, "fill")))
+                if table_fill:
+                    break
+
+        # A table style's most predictable, user-visible accent is the first
+        # row conditional fill.  Older packs used the first text colour as a
+        # best-effort preview fallback, which remains supported here.
+        header_fill = style_node.find(
+            "w:tblStylePr[@w:type='firstRow']/w:tcPr/w:shd",
+            namespaces=core.NS,
+        )
+        if header_fill is not None:
+            table_accent = _safe_hex(
+                header_fill.get(core.qn(core.W_NS, "fill"))
+            )
+        if table_accent is None:
+            for color in style_node.xpath(".//w:color", namespaces=core.NS):
+                table_accent = _safe_hex(color.get(core.qn(core.W_NS, "val")))
+                if table_accent:
+                    break
 
     rfonts = run_properties.get("rFonts")
     font_latin: Optional[str] = None
@@ -646,6 +668,37 @@ def inspect_source(
         return (3, 0, str(item.get("name", "")).casefold())
 
     used_formats.sort(key=sort_key)
+    table_style_edit_candidate: Optional[Dict[str, object]] = None
+    if not table_usage:
+        candidate_style_id = default_table
+        candidate_info = (
+            catalog.styles.get(candidate_style_id)
+            if candidate_style_id is not None
+            else None
+        )
+        if candidate_info is None or candidate_info.style_type != "table":
+            candidate_style_id = catalog.fallback("table")
+            candidate_info = (
+                catalog.styles.get(candidate_style_id)
+                if candidate_style_id is not None
+                else None
+            )
+        if (
+            candidate_style_id is not None
+            and candidate_info is not None
+            and candidate_info.style_type == "table"
+        ):
+            table_style_edit_candidate = _style_preview(
+                candidate_style_id,
+                "table",
+                0,
+                {},
+                catalog,
+                styles_root,
+                theme,
+                inferred=True,
+                inference_label="可选表格方案",
+            )
     layouts = core.extract_source_section_layout(entries["word/document.xml"])
     first_layout = layouts[0] if layouts else []
     first_layout_by_name = {etree.QName(x).localname: x for x in first_layout}
@@ -673,6 +726,7 @@ def inspect_source(
         "used_formats": used_formats,
         "used_style_count": len(used_formats) - len(inferred_heading_styles),
         "inferred_style_count": len(inferred_heading_styles),
+        "custom_style_count": 0,
         "inferred_heading_styles": [
             inferred_heading_styles[level]
             for level in sorted(inferred_heading_styles)
@@ -691,7 +745,13 @@ def inspect_source(
         "heading_numbering_conflicts": sorted(numbering_conflicts),
         "used_table_styles": sorted(table_usage.keys()),
         "preferred_table_style": (
-            table_usage.most_common(1)[0][0] if table_usage else catalog.fallback("table")
+            table_usage.most_common(1)[0][0]
+            if table_usage
+            else (
+                str(table_style_edit_candidate["style_id"])
+                if table_style_edit_candidate is not None
+                else catalog.fallback("table")
+            )
         ),
         "manual_formatting": {
             "paragraph_count": manual_paragraphs,
@@ -737,6 +797,11 @@ def inspect_source(
             "display_name_derived_from_source": True,
         },
     }
+    if table_style_edit_candidate is not None:
+        # Keep the format overview truthful: an unused table style is not part
+        # of used_formats.  The editor may expose exactly this one allow-listed
+        # candidate without revealing every dormant Word gallery style.
+        manifest["table_style_edit_candidate"] = table_style_edit_candidate
     return package, catalog, manifest
 
 
@@ -903,34 +968,35 @@ def _part_checksums(entries: Dict[str, bytes]) -> Dict[str, str]:
     }
 
 
-def create_style_pack(
-    source_path: Path,
+def _format_fingerprint(checksums: Dict[str, str]) -> str:
+    digest = hashlib.sha256()
+    for name, checksum in sorted(checksums.items()):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(checksum.encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _write_style_pack_archive(
     pack_path: Path,
-    display_name: Optional[str] = None,
+    manifest: Dict[str, object],
+    format_entries: Dict[str, bytes],
     force: bool = False,
 ) -> Dict[str, object]:
+    """Atomically write and verify a privacy-filtered style pack."""
     pack_path = pack_path.expanduser().resolve()
     if pack_path.suffix.lower() != PACK_SUFFIX:
         raise core.TransferError("格式库文件必须使用 %s 扩展名。" % PACK_SUFFIX)
     if pack_path.exists() and not force:
         raise core.TransferError("格式库文件已存在。")
 
-    package, _catalog, manifest = inspect_source(source_path)
-    if display_name and display_name.strip():
-        manifest["name"] = display_name.strip()
-        privacy = manifest.get("privacy")
-        if isinstance(privacy, dict):
-            privacy["display_name_derived_from_source"] = False
-    format_entries = _pack_format_entries(package.entries)
-    manifest["format_part_count"] = len(format_entries)
-    manifest["part_sha256"] = _part_checksums(format_entries)
-    digest = hashlib.sha256()
-    for name, checksum in sorted(manifest["part_sha256"].items()):
-        digest.update(name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(checksum.encode("ascii"))
-        digest.update(b"\n")
-    manifest["format_fingerprint"] = digest.hexdigest()
+    persisted_manifest = copy.deepcopy(manifest)
+    persisted_manifest.pop("pack_path", None)
+    persisted_manifest["format_part_count"] = len(format_entries)
+    checksums = _part_checksums(format_entries)
+    persisted_manifest["part_sha256"] = checksums
+    persisted_manifest["format_fingerprint"] = _format_fingerprint(checksums)
 
     parent_existed = pack_path.parent.exists()
     pack_path.parent.mkdir(parents=True, exist_ok=True)
@@ -951,7 +1017,7 @@ def create_style_pack(
             archive.writestr(
                 _zip_info("manifest.json"),
                 json.dumps(
-                    manifest,
+                    persisted_manifest,
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ).encode("utf-8"),
@@ -964,15 +1030,316 @@ def create_style_pack(
                 raise core.TransferError("格式库校验失败：%s" % bad)
             if "manifest.json" not in verify.namelist():
                 raise core.TransferError("格式库缺少 manifest.json。")
+        # Validate the complete manifest/checksum contract before the atomic
+        # rename, not just the ZIP CRCs.  load_style_pack accepts the temporary
+        # suffix and performs the same checks used for every later read.
+        load_style_pack(temp_path)
         os.replace(temp_path, pack_path)
-        os.chmod(pack_path, 0o600)
     finally:
         if temp_path.exists():
             temp_path.unlink()
 
-    result = dict(manifest)
+    result = dict(persisted_manifest)
     result["pack_path"] = str(pack_path)
     return result
+
+
+def create_style_pack(
+    source_path: Path,
+    pack_path: Path,
+    display_name: Optional[str] = None,
+    force: bool = False,
+) -> Dict[str, object]:
+    pack_path = pack_path.expanduser().resolve()
+    if pack_path.suffix.lower() != PACK_SUFFIX:
+        raise core.TransferError("格式库文件必须使用 %s 扩展名。" % PACK_SUFFIX)
+    if pack_path.exists() and not force:
+        raise core.TransferError("格式库文件已存在。")
+
+    package, _catalog, manifest = inspect_source(source_path)
+    if display_name and display_name.strip():
+        manifest["name"] = display_name.strip()
+        privacy = manifest.get("privacy")
+        if isinstance(privacy, dict):
+            privacy["display_name_derived_from_source"] = False
+    format_entries = _pack_format_entries(package.entries)
+    return _write_style_pack_archive(
+        pack_path,
+        manifest,
+        format_entries,
+        force=force,
+    )
+
+
+def _manifest_string(
+    value: object,
+    field: str,
+    *,
+    maximum: int,
+    allow_empty: bool = False,
+) -> str:
+    if not isinstance(value, str):
+        raise core.TransferError("格式库字段 %s 必须是文本。" % field)
+    if (not value and not allow_empty) or len(value) > maximum:
+        raise core.TransferError(
+            "格式库字段 %s 长度无效（最多 %d 个字符）。" % (field, maximum)
+        )
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise core.TransferError("格式库字段 %s 包含控制字符。" % field)
+    return value
+
+
+def _manifest_nonnegative_int(value: object, field: str) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+    ):
+        raise core.TransferError("格式库字段 %s 必须是非负整数。" % field)
+    return value
+
+
+def _manifest_optional_number(value: object, field: str) -> None:
+    if value is None:
+        return
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise core.TransferError("格式库字段 %s 必须是有限数值或空值。" % field)
+
+
+def _validate_used_format_record(
+    raw: object, field: str
+) -> Tuple[str, str]:
+    if not isinstance(raw, dict):
+        raise core.TransferError("格式库字段 %s 必须是对象。" % field)
+    style_id = _manifest_string(
+        raw.get("style_id"), "%s.style_id" % field, maximum=255
+    )
+    style_type = _manifest_string(
+        raw.get("type"), "%s.type" % field, maximum=32
+    )
+    if style_type not in {"paragraph", "character", "table"}:
+        raise core.TransferError("格式库字段 %s.type 不受支持。" % field)
+    _manifest_string(raw.get("name"), "%s.name" % field, maximum=512)
+    _manifest_nonnegative_int(
+        raw.get("usage_count"), "%s.usage_count" % field
+    )
+    _manifest_string(
+        raw.get("sample"), "%s.sample" % field, maximum=4096,
+        allow_empty=True,
+    )
+    if not isinstance(raw.get("numbered"), bool):
+        raise core.TransferError("格式库字段 %s.numbered 必须是布尔值。" % field)
+
+    for key in ("inferred", "configured", "bold", "italic"):
+        value = raw.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise core.TransferError(
+                "格式库字段 %s.%s 必须是布尔值或空值。" % (field, key)
+            )
+    for key in (
+        "inference_label",
+        "font_latin",
+        "font_east_asia",
+        "color_hex",
+        "alignment",
+        "line_rule",
+        "numbering_format",
+        "numbering_pattern",
+        "numbering_example",
+        "table_fill_hex",
+        "table_accent_hex",
+    ):
+        value = raw.get(key)
+        if value is not None:
+            _manifest_string(
+                value, "%s.%s" % (field, key), maximum=1024,
+                allow_empty=True,
+            )
+    for key in (
+        "size_pt",
+        "space_before_pt",
+        "space_after_pt",
+        "line_spacing",
+    ):
+        _manifest_optional_number(raw.get(key), "%s.%s" % (field, key))
+    for key in ("outline_level", "numbering_level"):
+        value = raw.get(key)
+        if value is not None:
+            parsed = _manifest_nonnegative_int(value, "%s.%s" % (field, key))
+            if parsed > 8:
+                raise core.TransferError(
+                    "格式库字段 %s.%s 必须在 0–8 之间。" % (field, key)
+                )
+
+    usage_by_story = raw.get("usage_by_story")
+    if usage_by_story is not None:
+        if not isinstance(usage_by_story, dict):
+            raise core.TransferError(
+                "格式库字段 %s.usage_by_story 必须是对象。" % field
+            )
+        for key, value in usage_by_story.items():
+            _manifest_string(
+                key, "%s.usage_by_story 键" % field, maximum=128
+            )
+            _manifest_nonnegative_int(
+                value, "%s.usage_by_story.%s" % (field, key)
+            )
+    return style_type, style_id
+
+
+def _validate_string_list(value: object, field: str) -> None:
+    if not isinstance(value, list):
+        raise core.TransferError("格式库字段 %s 必须是文本数组。" % field)
+    for index, item in enumerate(value):
+        _manifest_string(
+            item, "%s[%d]" % (field, index), maximum=1024,
+            allow_empty=True,
+        )
+
+
+def _validate_count_object(
+    value: object, field: str, required_keys: Sequence[str]
+) -> None:
+    if not isinstance(value, dict):
+        raise core.TransferError("格式库字段 %s 必须是对象。" % field)
+    for key in required_keys:
+        _manifest_nonnegative_int(value.get(key), "%s.%s" % (field, key))
+
+
+def _validate_style_pack_manifest(manifest: Dict[str, object]) -> None:
+    """Validate the stable subset consumed by Swift and pack operations."""
+
+    if "pack_path" in manifest:
+        raise core.TransferError("格式库不能保存本机 pack_path 字段。")
+    _manifest_string(manifest.get("id"), "id", maximum=128)
+    _manifest_string(manifest.get("name"), "name", maximum=512)
+
+    raw_formats = manifest.get("used_formats")
+    if not isinstance(raw_formats, list):
+        raise core.TransferError("格式库字段 used_formats 必须是数组。")
+    seen_formats: Set[Tuple[str, str]] = set()
+    for index, raw in enumerate(raw_formats):
+        identity = _validate_used_format_record(
+            raw, "used_formats[%d]" % index
+        )
+        if identity in seen_formats:
+            raise core.TransferError(
+                "格式库包含重复样式：%s/%s。" % identity
+            )
+        seen_formats.add(identity)
+
+    raw_table_styles = manifest.get("used_table_styles")
+    _validate_string_list(raw_table_styles, "used_table_styles")
+    if len(set(raw_table_styles)) != len(raw_table_styles):
+        raise core.TransferError("格式库字段 used_table_styles 包含重复值。")
+
+    for key in (
+        "used_style_count",
+        "inferred_style_count",
+        "custom_style_count",
+        "defined_style_count",
+        "hidden_style_count",
+        "format_part_count",
+    ):
+        if key == "used_style_count" or key == "format_part_count" or key in manifest:
+            _manifest_nonnegative_int(manifest.get(key), key)
+
+    _validate_count_object(
+        manifest.get("manual_formatting"),
+        "manual_formatting",
+        ("paragraph_count", "run_count"),
+    )
+    _validate_count_object(
+        manifest.get("document_summary"),
+        "document_summary",
+        ("paragraph_count", "run_count", "table_count", "section_count"),
+    )
+
+    page_layout = manifest.get("page_layout")
+    if not isinstance(page_layout, dict):
+        raise core.TransferError("格式库字段 page_layout 必须是对象。")
+    for key in (
+        "width_cm",
+        "height_cm",
+        "margin_top_cm",
+        "margin_bottom_cm",
+        "margin_left_cm",
+        "margin_right_cm",
+    ):
+        _manifest_optional_number(page_layout.get(key), "page_layout.%s" % key)
+    orientation = page_layout.get("orientation")
+    if orientation is not None:
+        _manifest_string(
+            orientation, "page_layout.orientation", maximum=32,
+            allow_empty=True,
+        )
+
+    privacy = manifest.get("privacy")
+    if privacy is not None:
+        if not isinstance(privacy, dict):
+            raise core.TransferError("格式库字段 privacy 必须是对象。")
+        for key, value in privacy.items():
+            _manifest_string(key, "privacy 键", maximum=128)
+            if not isinstance(value, bool):
+                raise core.TransferError(
+                    "格式库字段 privacy.%s 必须是布尔值。" % key
+                )
+
+    for key in (
+        "inferred_heading_styles",
+        "heading_numbering_conflicts",
+        "heading_completion_warnings",
+    ):
+        if key in manifest:
+            _validate_string_list(manifest[key], key)
+    for key in ("created_at", "source_file_name", "source_sha256"):
+        value = manifest.get(key)
+        if value is not None:
+            _manifest_string(value, key, maximum=1024, allow_empty=True)
+    preferred_table = manifest.get("preferred_table_style")
+    if preferred_table is not None:
+        _manifest_string(
+            preferred_table, "preferred_table_style", maximum=255,
+            allow_empty=True,
+        )
+
+    candidate = manifest.get("table_style_edit_candidate")
+    if candidate is not None:
+        candidate_identity = _validate_used_format_record(
+            candidate, "table_style_edit_candidate"
+        )
+        if candidate_identity[0] != "table":
+            raise core.TransferError("格式库的可选表格方案必须是 table 类型。")
+
+    for key in ("heading_numbering", "heading_paragraph_indents", "derivation"):
+        if key in manifest and not isinstance(manifest[key], dict):
+            raise core.TransferError("格式库字段 %s 必须是对象。" % key)
+    authorities = manifest.get("heading_authorities")
+    if authorities is not None:
+        if not isinstance(authorities, dict):
+            raise core.TransferError("格式库字段 heading_authorities 必须是对象。")
+        for key, value in authorities.items():
+            _manifest_string(key, "heading_authorities 键", maximum=8)
+            _manifest_string(
+                value, "heading_authorities.%s" % key, maximum=255
+            )
+    section_layouts = manifest.get("section_layouts")
+    if section_layouts is not None:
+        if not isinstance(section_layouts, list):
+            raise core.TransferError("格式库字段 section_layouts 必须是数组。")
+        for section_index, section in enumerate(section_layouts):
+            if not isinstance(section, list):
+                raise core.TransferError(
+                    "格式库字段 section_layouts[%d] 必须是数组。"
+                    % section_index
+                )
+            _validate_string_list(
+                section, "section_layouts[%d]" % section_index
+            )
 
 
 def load_style_pack(pack_path: Path) -> Tuple[Dict[str, object], Dict[str, bytes]]:
@@ -980,22 +1347,21 @@ def load_style_pack(pack_path: Path) -> Tuple[Dict[str, object], Dict[str, bytes
     if not pack_path.exists() or not zipfile.is_zipfile(pack_path):
         raise core.TransferError("格式库不存在或已损坏：%s" % pack_path)
     with zipfile.ZipFile(pack_path, "r") as archive:
-        bad = archive.testzip()
-        if bad:
-            raise core.TransferError("格式库压缩数据损坏：%s" % bad)
-        seen: Set[str] = set()
+        member_list = archive.infolist()
+        # Validate every central-directory record before testzip() or read()
+        # can decompress attacker-controlled data.  The shared validator
+        # handles names, duplicates, encryption, compression methods and
+        # compression-ratio bombs; packs then apply their tighter memory caps
+        # and manifest/parts-only contract below.
+        core.validate_package_members(member_list, "格式库")
+        if len(member_list) > MAX_PACK_MEMBERS:
+            raise core.TransferError(
+                "格式库包含过多条目（%d 个，最多允许 %d 个）。"
+                % (len(member_list), MAX_PACK_MEMBERS)
+            )
         total_size = 0
-        for info in archive.infolist():
+        for info in member_list:
             name = info.filename
-            path = PurePosixPath(name)
-            if (
-                name in seen
-                or name.startswith("/")
-                or "\\" in name
-                or ".." in path.parts
-            ):
-                raise core.TransferError("格式库包含不安全的条目：%s" % name)
-            seen.add(name)
             if name != "manifest.json" and not name.startswith(PART_PREFIX):
                 raise core.TransferError("格式库包含未知条目：%s" % name)
             if info.file_size > MAX_PACK_MEMBER_BYTES:
@@ -1003,16 +1369,26 @@ def load_style_pack(pack_path: Path) -> Tuple[Dict[str, object], Dict[str, bytes
             total_size += info.file_size
         if total_size > MAX_PACK_TOTAL_BYTES:
             raise core.TransferError("格式库体积异常，已停止读取。")
+        bad = archive.testzip()
+        if bad:
+            raise core.TransferError("格式库压缩数据损坏：%s" % bad)
         try:
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
         except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise core.TransferError("无法读取格式库信息：%s" % exc) from exc
-        if manifest.get("schema_version") != PACK_SCHEMA_VERSION:
+        if not isinstance(manifest, dict):
+            raise core.TransferError("格式库信息结构无效。")
+        schema_version = manifest.get("schema_version")
+        if (
+            not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version != PACK_SCHEMA_VERSION
+        ):
             raise core.TransferError("格式库版本不受支持。")
         entries = {
-            name[len(PART_PREFIX) :]: archive.read(name)
-            for name in archive.namelist()
-            if name.startswith(PART_PREFIX) and not name.endswith("/")
+            info.filename[len(PART_PREFIX) :]: archive.read(info.filename)
+            for info in member_list
+            if info.filename.startswith(PART_PREFIX) and not info.is_dir()
         }
     required = {
         "[Content_Types].xml",
@@ -1028,8 +1404,19 @@ def load_style_pack(pack_path: Path) -> Tuple[Dict[str, object], Dict[str, bytes
     actual_checksums = _part_checksums(entries)
     if expected_checksums != actual_checksums:
         raise core.TransferError("格式库完整性校验失败，文件可能已被修改。")
+    expected_fingerprint = manifest.get("format_fingerprint")
+    if expected_fingerprint is not None:
+        if (
+            not isinstance(expected_fingerprint, str)
+            or expected_fingerprint != _format_fingerprint(actual_checksums)
+        ):
+            raise core.TransferError("格式库格式指纹校验失败，文件可能已被修改。")
+    _validate_style_pack_manifest(manifest)
+    if manifest.get("format_part_count") != len(entries):
+        raise core.TransferError("格式库部件数量与清单不一致。")
     manifest = dict(manifest)
     manifest["pack_path"] = str(pack_path)
+    _synthesize_legacy_table_edit_candidate(manifest, entries)
     return manifest, entries
 
 
@@ -1058,6 +1445,912 @@ def _decode_layouts(manifest: Dict[str, object]) -> List[List[etree._Element]]:
                 raise core.TransferError("格式库页面设置损坏：%s" % exc) from exc
         layouts.append(layout)
     return layouts
+
+
+_RUN_STYLE_EDIT_FIELDS = {
+    "font_east_asia",
+    "font_latin",
+    "size_pt",
+    "bold",
+    "color_hex",
+}
+_TABLE_STYLE_EDIT_FIELDS = {"table_fill_hex", "table_accent_hex"}
+_STYLE_EDIT_FIELDS = _RUN_STYLE_EDIT_FIELDS | _TABLE_STYLE_EDIT_FIELDS
+_DERIVED_MANIFEST_COPY_FIELDS = {
+    "heading_authorities",
+    "heading_completion_warnings",
+    "heading_numbering",
+    "heading_paragraph_indents",
+    "heading_numbering_conflicts",
+    "manual_formatting",
+    "document_summary",
+    "page_layout",
+    "section_layouts",
+}
+_TABLE_PROPERTY_ORDER = (
+    "tblStyle",
+    "tblpPr",
+    "tblOverlap",
+    "bidiVisual",
+    "tblStyleRowBandSize",
+    "tblStyleColBandSize",
+    "tblW",
+    "jc",
+    "tblCellSpacing",
+    "tblInd",
+    "tblBorders",
+    "shd",
+    "tblLayout",
+    "tblCellMar",
+    "tblLook",
+    "tblCaption",
+    "tblDescription",
+    "tblPrChange",
+)
+_TABLE_STYLE_PROPERTY_ORDER = ("pPr", "rPr", "tblPr", "trPr", "tcPr")
+_TABLE_CELL_PROPERTY_ORDER = (
+    "cnfStyle",
+    "tcW",
+    "gridSpan",
+    "hMerge",
+    "vMerge",
+    "tcBorders",
+    "shd",
+    "noWrap",
+    "tcMar",
+    "textDirection",
+    "tcFitText",
+    "vAlign",
+    "hideMark",
+    "headers",
+    "cellIns",
+    "cellDel",
+    "cellMerge",
+    "tcPrChange",
+)
+
+
+def _validated_short_text(value: object, label: str, maximum: int = 128) -> str:
+    if not isinstance(value, str):
+        raise core.TransferError("%s必须是文本。" % label)
+    normalized = value.strip()
+    if not normalized:
+        raise core.TransferError("%s不能为空。" % label)
+    if len(normalized) > maximum:
+        raise core.TransferError("%s过长，最多允许 %d 个字符。" % (label, maximum))
+    if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+        raise core.TransferError("%s包含不允许的控制字符。" % label)
+    return normalized
+
+
+def _validated_edit_color(value: object, label: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"#?[0-9A-Fa-f]{6}", value.strip()
+    ):
+        raise core.TransferError("%s必须是 6 位十六进制颜色，例如 #165D52。" % label)
+    return value.strip().lstrip("#").upper()
+
+
+def _normalize_style_edits(payload: object) -> List[Dict[str, object]]:
+    """Validate the v1 style-editor protocol and return canonical edits.
+
+    Protocol::
+
+        {"styles": [{"style_id": "Heading1", "font_east_asia": "宋体",
+                     "font_latin": "Arial", "size_pt": 18,
+                     "bold": true, "color_hex": "165D52"},
+                    {"style_id": "TableGrid", "table_fill_hex": "FFFFFF",
+                     "table_accent_hex": "D9EAF7"}]}
+
+    Unknown fields are rejected deliberately so a GUI cannot accidentally
+    mutate arbitrary OOXML through this interface.
+    """
+    if not isinstance(payload, dict):
+        raise core.TransferError("格式编辑请求必须是 JSON 对象。")
+    unknown_top_level = set(payload).difference({"styles"})
+    if unknown_top_level:
+        raise core.TransferError(
+            "格式编辑请求包含未知字段：%s。"
+            % "、".join(sorted(str(value) for value in unknown_top_level))
+        )
+    raw_edits = payload.get("styles")
+    if not isinstance(raw_edits, list) or not raw_edits:
+        raise core.TransferError("格式编辑请求至少需要包含一个样式。")
+    if len(raw_edits) > 256:
+        raise core.TransferError("单次最多编辑 256 个样式。")
+
+    normalized_edits: List[Dict[str, object]] = []
+    seen_style_ids: Set[str] = set()
+    for index, raw_edit in enumerate(raw_edits, start=1):
+        if not isinstance(raw_edit, dict):
+            raise core.TransferError("第 %d 个样式编辑项必须是 JSON 对象。" % index)
+        unknown = set(raw_edit).difference({"style_id"} | _STYLE_EDIT_FIELDS)
+        if unknown:
+            raise core.TransferError(
+                "第 %d 个样式编辑项包含未知字段：%s。"
+                % (index, "、".join(sorted(str(value) for value in unknown)))
+            )
+        style_id = _validated_short_text(
+            raw_edit.get("style_id"), "第 %d 个样式 ID" % index
+        )
+        if style_id in seen_style_ids:
+            raise core.TransferError("样式 %s 在编辑请求中重复出现。" % style_id)
+        seen_style_ids.add(style_id)
+
+        edit: Dict[str, object] = {"style_id": style_id}
+        if "font_east_asia" in raw_edit:
+            edit["font_east_asia"] = _validated_short_text(
+                raw_edit["font_east_asia"], "东亚字体", maximum=127
+            )
+        if "font_latin" in raw_edit:
+            edit["font_latin"] = _validated_short_text(
+                raw_edit["font_latin"], "西文字体", maximum=127
+            )
+        if "size_pt" in raw_edit:
+            raw_size = raw_edit["size_pt"]
+            if isinstance(raw_size, bool) or not isinstance(raw_size, (int, float)):
+                raise core.TransferError("字号必须是 5–200 磅之间的数字。")
+            try:
+                size = float(raw_size)
+            except (OverflowError, TypeError, ValueError):
+                raise core.TransferError("字号必须是 5–200 磅之间的数字。")
+            if not math.isfinite(size):
+                raise core.TransferError("字号必须是 5–200 磅之间的数字。")
+            if not 5.0 <= size <= 200.0 or not (size * 2).is_integer():
+                raise core.TransferError("字号必须在 5–200 磅之间，并以 0.5 磅递增。")
+            edit["size_pt"] = size
+        if "bold" in raw_edit:
+            if not isinstance(raw_edit["bold"], bool):
+                raise core.TransferError("粗体值必须是 true 或 false。")
+            edit["bold"] = raw_edit["bold"]
+        if "color_hex" in raw_edit:
+            edit["color_hex"] = _validated_edit_color(
+                raw_edit["color_hex"], "文字颜色"
+            )
+        if "table_fill_hex" in raw_edit:
+            edit["table_fill_hex"] = _validated_edit_color(
+                raw_edit["table_fill_hex"], "表格底色"
+            )
+        if "table_accent_hex" in raw_edit:
+            edit["table_accent_hex"] = _validated_edit_color(
+                raw_edit["table_accent_hex"], "表格强调色"
+            )
+        if len(edit) == 1:
+            raise core.TransferError("样式 %s 没有提供任何可修改字段。" % style_id)
+        normalized_edits.append(edit)
+    return normalized_edits
+
+
+def _ordered_insert_child(
+    parent: etree._Element,
+    node: etree._Element,
+    order: Sequence[str],
+) -> None:
+    ranks = {name: index for index, name in enumerate(order)}
+    node_rank = ranks.get(etree.QName(node).localname, len(ranks))
+    insertion = len(parent)
+    for index, child in enumerate(parent):
+        if ranks.get(etree.QName(child).localname, len(ranks)) > node_rank:
+            insertion = index
+            break
+    parent.insert(insertion, node)
+
+
+def _ensure_ordered_child(
+    parent: etree._Element,
+    local: str,
+    order: Sequence[str],
+) -> etree._Element:
+    matches = parent.findall(core.qn(core.W_NS, local))
+    if matches:
+        for duplicate in matches[1:]:
+            parent.remove(duplicate)
+        return matches[0]
+    node = etree.Element(core.qn(core.W_NS, local))
+    _ordered_insert_child(parent, node, order)
+    return node
+
+
+def _apply_run_edits(
+    run_properties: etree._Element,
+    edit: Dict[str, object],
+) -> None:
+    if "font_latin" in edit or "font_east_asia" in edit:
+        fonts = _ensure_ordered_child(
+            run_properties, "rFonts", core.RPR_CHILD_ORDER
+        )
+        if "font_latin" in edit:
+            font_name = str(edit["font_latin"])
+            fonts.set(core.qn(core.W_NS, "ascii"), font_name)
+            fonts.set(core.qn(core.W_NS, "hAnsi"), font_name)
+            for attribute in ("asciiTheme", "hAnsiTheme"):
+                fonts.attrib.pop(core.qn(core.W_NS, attribute), None)
+        if "font_east_asia" in edit:
+            fonts.set(
+                core.qn(core.W_NS, "eastAsia"), str(edit["font_east_asia"])
+            )
+            fonts.attrib.pop(core.qn(core.W_NS, "eastAsiaTheme"), None)
+
+    if "bold" in edit:
+        value = "1" if bool(edit["bold"]) else "0"
+        for local in ("b", "bCs"):
+            node = _ensure_ordered_child(
+                run_properties, local, core.RPR_CHILD_ORDER
+            )
+            node.set(core.qn(core.W_NS, "val"), value)
+
+    if "color_hex" in edit:
+        color = _ensure_ordered_child(
+            run_properties, "color", core.RPR_CHILD_ORDER
+        )
+        color.set(core.qn(core.W_NS, "val"), str(edit["color_hex"]))
+        for attribute in ("themeColor", "themeTint", "themeShade"):
+            color.attrib.pop(core.qn(core.W_NS, attribute), None)
+
+    if "size_pt" in edit:
+        half_points = str(int(round(float(edit["size_pt"]) * 2)))
+        for local in ("sz", "szCs"):
+            node = _ensure_ordered_child(
+                run_properties, local, core.RPR_CHILD_ORDER
+            )
+            node.set(core.qn(core.W_NS, "val"), half_points)
+
+
+def _set_solid_shading(node: etree._Element, color_hex: str) -> None:
+    node.set(core.qn(core.W_NS, "val"), "clear")
+    node.set(core.qn(core.W_NS, "color"), "auto")
+    node.set(core.qn(core.W_NS, "fill"), color_hex)
+    for attribute in (
+        "themeColor",
+        "themeTint",
+        "themeShade",
+        "themeFill",
+        "themeFillTint",
+        "themeFillShade",
+    ):
+        node.attrib.pop(core.qn(core.W_NS, attribute), None)
+
+
+def _apply_style_node_edit(
+    style_node: etree._Element,
+    style_type: str,
+    edit: Dict[str, object],
+) -> None:
+    run_fields = _RUN_STYLE_EDIT_FIELDS.intersection(edit)
+    table_fields = _TABLE_STYLE_EDIT_FIELDS.intersection(edit)
+    if run_fields:
+        if style_type not in {"paragraph", "character"}:
+            raise core.TransferError(
+                "样式 %s 不是段落或字符样式，不能修改字体属性。"
+                % edit["style_id"]
+            )
+        run_properties = _ensure_ordered_child(
+            style_node, "rPr", core.STYLE_CHILD_ORDER
+        )
+        _apply_run_edits(run_properties, edit)
+    if table_fields:
+        if style_type != "table":
+            raise core.TransferError(
+                "样式 %s 不是表格样式，不能修改表格配色。"
+                % edit["style_id"]
+            )
+        if "table_fill_hex" in edit:
+            table_properties = _ensure_ordered_child(
+                style_node, "tblPr", core.STYLE_CHILD_ORDER
+            )
+            shading = _ensure_ordered_child(
+                table_properties, "shd", _TABLE_PROPERTY_ORDER
+            )
+            _set_solid_shading(shading, str(edit["table_fill_hex"]))
+        if "table_accent_hex" in edit:
+            first_row = next(
+                (
+                    node
+                    for node in style_node.findall("w:tblStylePr", namespaces=core.NS)
+                    if node.get(core.qn(core.W_NS, "type")) == "firstRow"
+                ),
+                None,
+            )
+            if first_row is None:
+                first_row = etree.Element(core.qn(core.W_NS, "tblStylePr"))
+                first_row.set(core.qn(core.W_NS, "type"), "firstRow")
+                # w:extLst must remain the final child of w:style.  Word is
+                # tolerant of many ordering mistakes, but other OOXML readers
+                # validate the schema sequence strictly.
+                ext_list = style_node.find("w:extLst", namespaces=core.NS)
+                insertion = (
+                    style_node.index(ext_list)
+                    if ext_list is not None
+                    else len(style_node)
+                )
+                style_node.insert(insertion, first_row)
+            cell_properties = _ensure_ordered_child(
+                first_row, "tcPr", _TABLE_STYLE_PROPERTY_ORDER
+            )
+            shading = _ensure_ordered_child(
+                cell_properties, "shd", _TABLE_CELL_PROPERTY_ORDER
+            )
+            _set_solid_shading(shading, str(edit["table_accent_hex"]))
+
+
+def _append_missing_font_records(
+    entries: Dict[str, bytes], edits: Sequence[Dict[str, object]]
+) -> None:
+    requested = {
+        str(edit[field])
+        for edit in edits
+        for field in ("font_latin", "font_east_asia")
+        if field in edit
+    }
+    if not requested:
+        return
+    _rels, roles = core.collect_format_relationships(entries)
+    record = roles.get("fontTable")
+    part_name = (
+        record[0] if record is not None else core.ROLE_FALLBACK_PARTS["fontTable"]
+    )
+    if part_name not in entries:
+        return
+    root = core.parse_xml(entries[part_name], part_name)
+    existing = {
+        str(node.get(core.qn(core.W_NS, "name"), "")).casefold()
+        for node in root.findall("w:font", namespaces=core.NS)
+    }
+    for name in sorted(requested, key=str.casefold):
+        if name.casefold() in existing:
+            continue
+        node = etree.SubElement(root, core.qn(core.W_NS, "font"))
+        node.set(core.qn(core.W_NS, "name"), name)
+        existing.add(name.casefold())
+    entries[part_name] = core.serialize_xml(root)
+
+
+def _apply_heading_numbering_edits(
+    entries: Dict[str, bytes],
+    manifest: Dict[str, object],
+    edits: Sequence[Dict[str, object]],
+) -> None:
+    """Keep a heading's visible number label aligned with edited text."""
+    raw_rules = manifest.get("heading_numbering")
+    if not isinstance(raw_rules, dict):
+        return
+    numbering_root, abstract_by_id, num_by_id, styles_by_id = core._numbering_index(
+        entries
+    )
+    if numbering_root is None:
+        return
+    changed = False
+    for edit in edits:
+        run_edit = {
+            key: value for key, value in edit.items() if key in _RUN_STYLE_EDIT_FIELDS
+        }
+        if not run_edit:
+            continue
+        raw_rule = raw_rules.get(str(edit["style_id"]))
+        if not isinstance(raw_rule, dict):
+            continue
+        raw_num_id = raw_rule.get("num_id")
+        raw_level = raw_rule.get("level")
+        try:
+            level = int(raw_level)
+        except (TypeError, ValueError):
+            continue
+        num_node = num_by_id.get(str(raw_num_id))
+        if num_node is None or not 0 <= level <= 8:
+            continue
+        abstract = core._abstract_for_num(
+            num_node, abstract_by_id, num_by_id, styles_by_id
+        )
+        if abstract is None:
+            continue
+        level_nodes: List[etree._Element] = []
+        base_level = core._level_node(abstract, level)
+        if base_level is not None:
+            level_nodes.append(base_level)
+        override = core._override_for_level(num_node, level)
+        override_level = (
+            override.find("w:lvl", namespaces=core.NS)
+            if override is not None
+            else None
+        )
+        if override_level is not None:
+            level_nodes.append(override_level)
+        for level_node in level_nodes:
+            run_properties = level_node.find("w:rPr", namespaces=core.NS)
+            if run_properties is None:
+                run_properties = etree.SubElement(
+                    level_node, core.qn(core.W_NS, "rPr")
+                )
+            _apply_run_edits(run_properties, run_edit)
+            changed = True
+    if changed:
+        _rels, roles = core.collect_format_relationships(entries)
+        record = roles.get("numbering")
+        part_name = (
+            record[0]
+            if record is not None
+            else core.ROLE_FALLBACK_PARTS["numbering"]
+        )
+        entries[part_name] = core.serialize_xml(numbering_root)
+
+
+def _refresh_used_format_previews(
+    manifest: Dict[str, object],
+    entries: Dict[str, bytes],
+) -> Tuple[List[Dict[str, object]], core.StyleCatalog]:
+    runtime_entries = dict(entries)
+    runtime_entries["word/document.xml"] = _placeholder_document()
+    catalog = core.build_style_catalog(
+        runtime_entries["word/styles.xml"], runtime_entries["word/document.xml"]
+    )
+    styles_root = core.parse_xml(runtime_entries["word/styles.xml"], "styles.xml")
+    theme = _theme_metadata(runtime_entries)
+    numbering = core.heading_numbering_from_manifest(
+        manifest.get("heading_numbering"), runtime_entries, catalog
+    )
+    previews: List[Dict[str, object]] = []
+    raw_formats = manifest.get("used_formats")
+    if not isinstance(raw_formats, list):
+        raise core.TransferError("格式库缺少可编辑样式清单。")
+    for raw_item in raw_formats:
+        if not isinstance(raw_item, dict):
+            continue
+        style_id = str(raw_item.get("style_id", ""))
+        info = catalog.styles.get(style_id)
+        if info is None:
+            continue
+        raw_count = raw_item.get("usage_count", 0)
+        usage_count = (
+            int(raw_count)
+            if isinstance(raw_count, int) and not isinstance(raw_count, bool)
+            else 0
+        )
+        raw_stories = raw_item.get("usage_by_story", {})
+        usage_by_story = (
+            {
+                str(key): int(value)
+                for key, value in raw_stories.items()
+                if isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+            }
+            if isinstance(raw_stories, dict)
+            else {}
+        )
+        inferred = raw_item.get("inferred") is True
+        configured = raw_item.get("configured") is True
+        preview = _style_preview(
+            style_id,
+            info.style_type,
+            max(0, usage_count),
+            usage_by_story,
+            catalog,
+            styles_root,
+            theme,
+            numbering.get(style_id),
+            inferred=inferred,
+            inference_label=(
+                "自定义表格方案"
+                if configured
+                else "智能补全"
+                if inferred
+                else None
+            ),
+        )
+        if configured:
+            preview["configured"] = True
+        previews.append(preview)
+    return previews, catalog
+
+
+def _table_edit_candidate_style_id(
+    manifest: Dict[str, object],
+    catalog: core.StyleCatalog,
+) -> Optional[str]:
+    """Return the single manifest-exposed unused table style, if present."""
+    raw_candidate = manifest.get("table_style_edit_candidate")
+    if raw_candidate is None:
+        return None
+    if not isinstance(raw_candidate, dict):
+        raise core.TransferError("格式库的可选表格方案信息无效。")
+    if raw_candidate.get("type") != "table":
+        raise core.TransferError("格式库的可选表格方案类型无效。")
+    if (
+        raw_candidate.get("inferred") is not True
+        or raw_candidate.get("inference_label") != "可选表格方案"
+    ):
+        raise core.TransferError("格式库的可选表格方案标记无效。")
+    raw_usage_count = raw_candidate.get("usage_count")
+    if (
+        not isinstance(raw_usage_count, int)
+        or isinstance(raw_usage_count, bool)
+        or raw_usage_count != 0
+    ):
+        raise core.TransferError("可选表格方案必须明确标记为未使用。")
+    style_id = _validated_short_text(
+        raw_candidate.get("style_id"), "可选表格方案 ID"
+    )
+    info = catalog.styles.get(style_id)
+    if info is None or info.style_type != "table":
+        raise core.TransferError("可选表格方案指向的表格样式不存在。")
+    raw_used_table_styles = manifest.get("used_table_styles", [])
+    if not isinstance(raw_used_table_styles, list):
+        raise core.TransferError("格式库的已用表格样式清单无效。")
+    used_table_styles = {str(value) for value in raw_used_table_styles}
+    raw_used_formats = manifest.get("used_formats", [])
+    if not isinstance(raw_used_formats, list):
+        raise core.TransferError("格式库缺少可编辑样式清单。")
+    used_format_ids = {
+        str(item.get("style_id"))
+        for item in raw_used_formats
+        if isinstance(item, dict) and item.get("type") == "table"
+    }
+    if used_table_styles or style_id in used_format_ids:
+        raise core.TransferError("已使用的表格样式不能同时作为可选表格方案。")
+    if str(manifest.get("preferred_table_style") or "") != style_id:
+        raise core.TransferError("可选表格方案与首选表格样式不一致。")
+    return style_id
+
+
+def _refreshed_table_candidate_preview(
+    style_id: str,
+    entries: Dict[str, bytes],
+    catalog: core.StyleCatalog,
+    *,
+    inferred: bool,
+    label: str,
+) -> Dict[str, object]:
+    _rels, roles = core.collect_format_relationships(entries)
+    styles_record = roles.get("styles")
+    styles_part = (
+        styles_record[0]
+        if styles_record is not None
+        else core.ROLE_FALLBACK_PARTS["styles"]
+    )
+    styles_root = core.parse_xml(entries[styles_part], styles_part)
+    return _style_preview(
+        style_id,
+        "table",
+        0,
+        {},
+        catalog,
+        styles_root,
+        _theme_metadata(entries),
+        inferred=inferred,
+        inference_label=label,
+    )
+
+
+def _synthesize_legacy_table_edit_candidate(
+    manifest: Dict[str, object], entries: Dict[str, bytes]
+) -> None:
+    """Expose one safe table candidate for older same-schema no-table packs.
+
+    This only enriches the in-memory manifest returned to list/info/derive;
+    the existing archive is never rewritten.
+    """
+    if "table_style_edit_candidate" in manifest:
+        return
+    raw_used_table_styles = manifest.get("used_table_styles", [])
+    raw_used_formats = manifest.get("used_formats", [])
+    if (
+        not isinstance(raw_used_table_styles, list)
+        or raw_used_table_styles
+        or not isinstance(raw_used_formats, list)
+        or any(
+            isinstance(item, dict) and item.get("type") == "table"
+            for item in raw_used_formats
+        )
+    ):
+        return
+
+    runtime_entries = dict(entries)
+    runtime_entries["word/document.xml"] = _placeholder_document()
+    catalog = core.build_style_catalog(
+        runtime_entries["word/styles.xml"], runtime_entries["word/document.xml"]
+    )
+    preferred = manifest.get("preferred_table_style")
+    preferred_id = str(preferred) if preferred else ""
+    preferred_info = catalog.styles.get(preferred_id)
+    if preferred_info is None or preferred_info.style_type != "table":
+        fallback = catalog.fallback("table")
+        preferred_id = str(fallback) if fallback else ""
+        preferred_info = catalog.styles.get(preferred_id)
+    if not preferred_id or preferred_info is None or preferred_info.style_type != "table":
+        return
+
+    manifest["preferred_table_style"] = preferred_id
+    manifest["table_style_edit_candidate"] = _refreshed_table_candidate_preview(
+        preferred_id,
+        runtime_entries,
+        catalog,
+        inferred=True,
+        label="可选表格方案",
+    )
+
+
+def derive_style_pack(
+    pack_path: Path,
+    output_path: Path,
+    edits_payload: object,
+    display_name: Optional[str] = None,
+    force: bool = False,
+) -> Dict[str, object]:
+    """Create a new style pack by applying allow-listed visual edits.
+
+    The input pack is always read-only.  The output receives a fresh identity,
+    integrity data and format fingerprint, and is written atomically.
+    """
+    source_path = pack_path.expanduser().resolve()
+    output_path = output_path.expanduser().resolve()
+    if source_path == output_path:
+        raise core.TransferError("为保护原格式方案，派生方案不能覆盖原文件。")
+    if output_path.exists() and source_path.exists():
+        try:
+            if os.path.samefile(source_path, output_path):
+                raise core.TransferError("为保护原格式方案，派生方案不能覆盖原文件。")
+        except OSError:
+            pass
+    if output_path.exists() and not force:
+        raise core.TransferError("格式库文件已存在。")
+
+    source_manifest, loaded_entries = load_style_pack(source_path)
+    edits = _normalize_style_edits(edits_payload)
+    # Re-run the same format-only collector used for source imports.  Even a
+    # manually crafted, checksum-valid pack therefore cannot carry document
+    # stories, media, macros, embedded fonts or relationship hooks forward.
+    entries = _pack_format_entries(loaded_entries)
+    runtime_entries = dict(entries)
+    runtime_entries["word/document.xml"] = _placeholder_document()
+    catalog = core.build_style_catalog(
+        runtime_entries["word/styles.xml"], runtime_entries["word/document.xml"]
+    )
+    # Packs created before heading-numbering metadata was introduced still
+    # contain the complete styles/numbering parts.  Derivation must use the
+    # same compatibility inference as apply_style_pack so editing a heading's
+    # font also edits its visible number label.  Persist the inferred rules in
+    # the new pack so subsequent edits no longer depend on legacy fallback.
+    effective_manifest = copy.deepcopy(source_manifest)
+    if "heading_numbering" not in effective_manifest:
+        legacy_heading_ids = {
+            str(item.get("style_id"))
+            for item in effective_manifest.get("used_formats", [])
+            if isinstance(item, dict)
+            and item.get("type") == "paragraph"
+            and item.get("outline_level") is not None
+        }
+        inferred_heading_numbering = core.infer_heading_numbering_rules(
+            runtime_entries, catalog, legacy_heading_ids
+        )
+        effective_manifest["heading_numbering"] = core.heading_numbering_manifest(
+            inferred_heading_numbering
+        )
+    exposed_style_ids = {
+        str(item.get("style_id"))
+        for item in effective_manifest.get("used_formats", [])
+        if isinstance(item, dict) and item.get("style_id")
+    }
+    candidate_style_id = _table_edit_candidate_style_id(
+        effective_manifest, catalog
+    )
+    if candidate_style_id is not None:
+        exposed_style_ids.add(candidate_style_id)
+    edited_style_ids = {str(edit["style_id"]) for edit in edits}
+    candidate_activated = (
+        candidate_style_id is not None
+        and candidate_style_id in edited_style_ids
+    )
+
+    _rels, roles = core.collect_format_relationships(entries)
+    styles_record = roles.get("styles")
+    styles_part = (
+        styles_record[0]
+        if styles_record is not None
+        else core.ROLE_FALLBACK_PARTS["styles"]
+    )
+    if styles_part not in entries:
+        raise core.TransferError("格式库缺少可编辑的样式部件。")
+    primary_root = core.parse_xml(entries[styles_part], styles_part)
+    primary_nodes: Dict[str, etree._Element] = {}
+    for node in primary_root.findall("w:style", namespaces=core.NS):
+        raw_style_id = node.get(core.qn(core.W_NS, "styleId"))
+        if not raw_style_id:
+            continue
+        style_id = str(raw_style_id)
+        if style_id in primary_nodes:
+            raise core.TransferError(
+                "格式方案包含重复的样式 ID：%s，不能安全编辑。" % style_id
+            )
+        primary_nodes[style_id] = node
+    for edit in edits:
+        style_id = str(edit["style_id"])
+        info = catalog.styles.get(style_id)
+        if info is None or style_id not in primary_nodes:
+            raise core.TransferError("格式方案中不存在样式：%s。" % style_id)
+        if style_id not in exposed_style_ids:
+            raise core.TransferError("样式 %s 未在此格式方案的可编辑清单中。" % style_id)
+        _apply_style_node_edit(primary_nodes[style_id], info.style_type, edit)
+    entries[styles_part] = core.serialize_xml(primary_root)
+
+    effects_record = roles.get("stylesWithEffects")
+    effects_part = (
+        effects_record[0]
+        if effects_record is not None
+        else core.ROLE_FALLBACK_PARTS["stylesWithEffects"]
+    )
+    if effects_part in entries and effects_part != styles_part:
+        effects_root = core.parse_xml(entries[effects_part], effects_part)
+        effects_nodes: Dict[str, etree._Element] = {}
+        for node in effects_root.findall("w:style", namespaces=core.NS):
+            raw_style_id = node.get(core.qn(core.W_NS, "styleId"))
+            if not raw_style_id:
+                continue
+            style_id = str(raw_style_id)
+            if style_id in effects_nodes:
+                raise core.TransferError(
+                    "格式方案的兼容样式部件包含重复 ID：%s，不能安全编辑。"
+                    % style_id
+                )
+            effects_nodes[style_id] = node
+        for edit in edits:
+            style_id = str(edit["style_id"])
+            info = catalog.styles[style_id]
+            node = effects_nodes.get(style_id)
+            if node is None or node.get(core.qn(core.W_NS, "type"), "paragraph") != info.style_type:
+                replacement = copy.deepcopy(primary_nodes[style_id])
+                if node is not None:
+                    effects_root.replace(node, replacement)
+                else:
+                    ext_list = effects_root.find("w:extLst", namespaces=core.NS)
+                    insertion = (
+                        effects_root.index(ext_list)
+                        if ext_list is not None
+                        else len(effects_root)
+                    )
+                    effects_root.insert(insertion, replacement)
+                effects_nodes[style_id] = replacement
+            else:
+                _apply_style_node_edit(node, info.style_type, edit)
+        entries[effects_part] = core.serialize_xml(effects_root)
+
+    _apply_heading_numbering_edits(entries, effective_manifest, edits)
+    _append_missing_font_records(entries, edits)
+    # Final privacy and relationship pass after all XML mutations.
+    entries = _pack_format_entries(entries)
+    previews, refreshed_catalog = _refresh_used_format_previews(
+        effective_manifest, entries
+    )
+    refreshed_candidate: Optional[Dict[str, object]] = None
+    if candidate_style_id is not None:
+        refreshed_candidate = _refreshed_table_candidate_preview(
+            candidate_style_id,
+            entries,
+            refreshed_catalog,
+            inferred=True,
+            label=(
+                "自定义表格方案"
+                if candidate_activated
+                else "可选表格方案"
+            ),
+        )
+        if candidate_activated:
+            refreshed_candidate["configured"] = True
+            previews.append(refreshed_candidate)
+
+    source_name = str(source_manifest.get("name") or "格式方案")
+    default_name = (source_name + " · 自定义")[:120]
+    name = _validated_short_text(
+        display_name if display_name is not None else default_name,
+        "派生方案名称",
+        maximum=120,
+    )
+    derived_manifest: Dict[str, object] = {
+        key: copy.deepcopy(effective_manifest[key])
+        for key in _DERIVED_MANIFEST_COPY_FIELDS
+        if key in effective_manifest
+    }
+    source_privacy = source_manifest.get("privacy")
+    source_name_derived = True
+    if isinstance(source_privacy, dict) and isinstance(
+        source_privacy.get("display_name_derived_from_source"), bool
+    ):
+        source_name_derived = bool(
+            source_privacy["display_name_derived_from_source"]
+        )
+    derived_manifest.update(
+        {
+            "schema_version": PACK_SCHEMA_VERSION,
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "used_formats": previews,
+            "used_style_count": sum(
+                1 for item in previews if item.get("inferred") is not True
+            ),
+            "inferred_style_count": sum(
+                1
+                for item in previews
+                if item.get("inferred") is True
+                and item.get("type") == "paragraph"
+                and item.get("outline_level") is not None
+            ),
+            "custom_style_count": sum(
+                1 for item in previews if item.get("configured") is True
+            ),
+            "inferred_heading_styles": [
+                str(item["style_id"])
+                for item in previews
+                if item.get("inferred") is True
+                and item.get("type") == "paragraph"
+                and item.get("outline_level") is not None
+            ],
+            "defined_style_count": len(refreshed_catalog.styles),
+            "hidden_style_count": max(
+                0, len(refreshed_catalog.styles) - len(previews)
+            ),
+            "used_table_styles": (
+                [candidate_style_id]
+                if candidate_activated and candidate_style_id is not None
+                else [
+                    str(value)
+                    for value in source_manifest.get("used_table_styles", [])
+                    if str(value) in refreshed_catalog.styles
+                    and refreshed_catalog.styles[str(value)].style_type == "table"
+                ]
+            ),
+            "preferred_table_style": (
+                candidate_style_id
+                if candidate_activated
+                else source_manifest.get("preferred_table_style")
+            ),
+            "derivation": {
+                "source_pack_id": source_manifest.get("id"),
+                "source_format_fingerprint": source_manifest.get(
+                    "format_fingerprint"
+                ),
+                "edited_styles": [
+                    {
+                        "style_id": str(edit["style_id"]),
+                        "fields": sorted(
+                            key for key in edit if key != "style_id"
+                        ),
+                    }
+                    for edit in edits
+                ],
+            },
+            "privacy": {
+                "source_path_stored": False,
+                "source_file_name_stored": False,
+                "source_text_stored": False,
+                "source_media_stored": False,
+                "embedded_fonts_stored": False,
+                "generic_samples_only": True,
+                "display_name_derived_from_source": (
+                    False
+                    if display_name is not None
+                    else source_name_derived
+                ),
+                "derived_without_source_document": True,
+            },
+        }
+    )
+    if refreshed_candidate is not None and not candidate_activated:
+        derived_manifest["table_style_edit_candidate"] = refreshed_candidate
+    preferred_table = derived_manifest.get("preferred_table_style")
+    if (
+        not preferred_table
+        or str(preferred_table) not in refreshed_catalog.styles
+        or refreshed_catalog.styles[str(preferred_table)].style_type != "table"
+    ):
+        derived_manifest["preferred_table_style"] = refreshed_catalog.fallback(
+            "table"
+        )
+    return _write_style_pack_archive(
+        output_path,
+        derived_manifest,
+        entries,
+        force=force,
+    )
 
 
 def apply_style_pack(
@@ -1290,6 +2583,11 @@ def apply_style_pack(
     layouts = [] if preserve_page_layout else _decode_layouts(manifest)
 
     stats = core.TransferStats()
+    core.materialize_target_body_numbering(target_entries, target_catalog, stats)
+    body_numbering = core.merge_target_body_numbering(
+        source_entries, target_entries, stats, target_catalog
+    )
+    stats.warnings.extend(body_numbering.warnings)
     if preserve_target_tables:
         stats.warnings.append(
             "格式库未包含实际使用的表格样式，已保留目标文档的表格外观，并取消表格单元格中的两字符首行缩进。"
@@ -1344,6 +2642,7 @@ def apply_style_pack(
                 else 0
             ),
             table_no_indent_styles=table_no_indent_styles,
+            body_numbering_map=body_numbering.num_id_map,
         )
         stats.content_parts_cleaned += 1
 
@@ -1351,6 +2650,23 @@ def apply_style_pack(
         stats.warnings.append(
             "Word 最多支持标题9；正文中的 %d 个标题9已保持原级别。"
             % stats.heading_level9_unchanged
+        )
+
+    if stats.body_list_paragraphs_preserved:
+        inherited_detail = (
+            "，其中 %d 个来自目标段落样式继承"
+            % stats.style_list_paragraphs_materialized
+            if stats.style_list_paragraphs_materialized
+            else ""
+        )
+        stats.warnings.append(
+            "已保留目标文档中的 %d 个普通编号或项目符号段落%s，"
+            "并隔离导入 %d 个列表实例以避免与模板编号冲突。"
+            % (
+                stats.body_list_paragraphs_preserved,
+                inherited_detail,
+                stats.target_numbering_definitions_imported,
+            )
         )
 
     core.set_heading_numbering_start_override(
@@ -1391,6 +2707,29 @@ def _json_result(payload: Dict[str, object]) -> None:
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
+def _read_edits_payload(
+    edits_json: Optional[str], edits_file: Optional[str]
+) -> object:
+    if edits_file is not None:
+        path = Path(edits_file).expanduser().resolve()
+        if not path.is_file():
+            raise core.TransferError("格式编辑请求文件不存在：%s" % path)
+        if path.stat().st_size > 1024 * 1024:
+            raise core.TransferError("格式编辑请求文件过大。")
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise core.TransferError("无法读取格式编辑请求：%s" % exc) from exc
+    else:
+        raw = edits_json or ""
+    if len(raw.encode("utf-8")) > MAX_EDITS_JSON_BYTES:
+        raise core.TransferError("格式编辑请求超过 1 MB，已停止读取。")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise core.TransferError("格式编辑请求不是有效 JSON：%s" % exc) from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Forma 赋式｜格式方案管理")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1403,6 +2742,15 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--out", required=True)
     create_parser.add_argument("--name")
     create_parser.add_argument("--force", action="store_true")
+
+    derive_parser = subparsers.add_parser("derive-pack")
+    derive_parser.add_argument("--pack", required=True)
+    derive_parser.add_argument("--out", required=True)
+    derive_parser.add_argument("--name")
+    edits_group = derive_parser.add_mutually_exclusive_group(required=True)
+    edits_group.add_argument("--edits-json")
+    edits_group.add_argument("--edits-file")
+    derive_parser.add_argument("--force", action="store_true")
 
     info_parser = subparsers.add_parser("pack-info")
     info_parser.add_argument("--pack", required=True)
@@ -1431,6 +2779,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             manifest = create_style_pack(
                 Path(args.source),
                 Path(args.out),
+                display_name=args.name,
+                force=args.force,
+            )
+            _json_result({"ok": True, "pack": manifest})
+        elif args.command == "derive-pack":
+            manifest = derive_style_pack(
+                Path(args.pack),
+                Path(args.out),
+                _read_edits_payload(args.edits_json, args.edits_file),
                 display_name=args.name,
                 force=args.force,
             )

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -130,6 +131,185 @@ class TableFallbackTests(unittest.TestCase):
                 for item in self.no_table_manifest["used_formats"]
             )
         )
+        candidate = self.no_table_manifest.get("table_style_edit_candidate")
+        self.assertIsInstance(candidate, dict)
+        self.assertEqual(candidate["style_id"], "TableNormal")
+        self.assertEqual(candidate["type"], "table")
+        self.assertEqual(candidate["usage_count"], 0)
+        self.assertTrue(candidate["inferred"])
+        self.assertEqual(candidate["inference_label"], "可选表格方案")
+
+    def test_unedited_table_candidate_stays_optional_in_derived_pack(self) -> None:
+        output_pack = self.working_dir / "no-table-text-edit.wfstyle"
+        derived = manager.derive_style_pack(
+            self.no_table_pack,
+            output_pack,
+            {
+                "styles": [
+                    {"style_id": "Normal", "font_east_asia": "宋体"}
+                ]
+            },
+        )
+        self.assertEqual(derived["used_table_styles"], [])
+        self.assertFalse(
+            any(item["type"] == "table" for item in derived["used_formats"])
+        )
+        candidate = derived.get("table_style_edit_candidate")
+        self.assertIsInstance(candidate, dict)
+        self.assertEqual(candidate["style_id"], "TableNormal")
+
+        output_docx = self.working_dir / "no-table-text-edit-output.docx"
+        manager.apply_style_pack(output_pack, FIXTURES / "target.docx", output_docx)
+        output_entries = read_zip(output_docx)
+        output_document = document_root(output_entries)
+        self.assertEqual(
+            output_document.xpath("//w:tblPr/w:tblStyle/@w:val", namespaces=NS),
+            ["TargetCustomTable"],
+        )
+        self.assertEqual(
+            table_structure(output_document), table_structure(self.target_document)
+        )
+
+    def test_edited_table_candidate_becomes_active_and_styles_target(self) -> None:
+        output_pack = self.working_dir / "no-table-custom-table.wfstyle"
+        derived = manager.derive_style_pack(
+            self.no_table_pack,
+            output_pack,
+            {
+                "styles": [
+                    {
+                        "style_id": "TableNormal",
+                        "table_fill_hex": "F2F7F5",
+                        "table_accent_hex": "27685D",
+                    }
+                ]
+            },
+        )
+        self.assertEqual(derived["used_table_styles"], ["TableNormal"])
+        self.assertEqual(derived["preferred_table_style"], "TableNormal")
+        self.assertNotIn("table_style_edit_candidate", derived)
+        active = [
+            item
+            for item in derived["used_formats"]
+            if item["style_id"] == "TableNormal"
+        ]
+        self.assertEqual(len(active), 1)
+        self.assertTrue(active[0]["inferred"])
+        self.assertEqual(active[0]["inference_label"], "自定义表格方案")
+        self.assertEqual(active[0]["table_fill_hex"], "F2F7F5")
+        self.assertEqual(active[0]["table_accent_hex"], "27685D")
+
+        output_docx = self.working_dir / "no-table-custom-table-output.docx"
+        manager.apply_style_pack(output_pack, FIXTURES / "target.docx", output_docx)
+        output_entries = read_zip(output_docx)
+        output_document = document_root(output_entries)
+        self.assertEqual(
+            output_document.xpath("//w:tblPr/w:tblStyle/@w:val", namespaces=NS),
+            ["TableNormal"],
+        )
+        self.assertEqual(
+            table_structure(output_document), table_structure(self.target_document)
+        )
+        style = table_style_node(output_entries, "TableNormal")
+        self.assertIsNotNone(style)
+        self.assertEqual(
+            style.xpath("w:tblPr/w:shd/@w:fill", namespaces=NS),
+            ["F2F7F5"],
+        )
+        self.assertEqual(
+            style.xpath(
+                "w:tblStylePr[@w:type='firstRow']/w:tcPr/w:shd/@w:fill",
+                namespaces=NS,
+            ),
+            ["27685D"],
+        )
+
+    def test_hidden_table_style_remains_rejected_by_editor_protocol(self) -> None:
+        candidate_id = self.no_table_manifest["table_style_edit_candidate"][
+            "style_id"
+        ]
+        hidden_table_id = next(
+            style_id
+            for style_id in ("TableGrid", "LightShading", "LightList")
+            if style_id != candidate_id
+        )
+        with self.assertRaisesRegex(core.TransferError, "可编辑清单"):
+            manager.derive_style_pack(
+                self.no_table_pack,
+                self.working_dir / "hidden-table-edit.wfstyle",
+                {
+                    "styles": [
+                        {
+                            "style_id": hidden_table_id,
+                            "table_accent_hex": "27685D",
+                        }
+                    ]
+                },
+            )
+
+    def test_legacy_no_table_pack_gets_in_memory_edit_candidate(self) -> None:
+        legacy_pack = self.working_dir / "legacy-no-table.wfstyle"
+        with zipfile.ZipFile(self.no_table_pack, "r") as source_archive:
+            with zipfile.ZipFile(legacy_pack, "w") as legacy_archive:
+                for info in source_archive.infolist():
+                    data = source_archive.read(info.filename)
+                    if info.filename == "manifest.json":
+                        raw_manifest = json.loads(data.decode("utf-8"))
+                        raw_manifest.pop("table_style_edit_candidate", None)
+                        raw_manifest.pop("custom_style_count", None)
+                        data = json.dumps(
+                            raw_manifest,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    legacy_archive.writestr(info, data)
+
+        with zipfile.ZipFile(legacy_pack, "r") as archive:
+            persisted = json.loads(archive.read("manifest.json").decode("utf-8"))
+        self.assertNotIn("table_style_edit_candidate", persisted)
+
+        loaded, _entries = manager.load_style_pack(legacy_pack)
+        candidate = loaded.get("table_style_edit_candidate")
+        self.assertIsInstance(candidate, dict)
+        self.assertEqual(candidate["style_id"], "TableNormal")
+        listed = manager.list_library(self.working_dir)["packs"]
+        legacy_listed = next(
+            item
+            for item in listed
+            if Path(str(item.get("pack_path"))).name == legacy_pack.name
+        )
+        self.assertEqual(
+            legacy_listed["table_style_edit_candidate"]["style_id"],
+            "TableNormal",
+        )
+
+        derived = manager.derive_style_pack(
+            legacy_pack,
+            self.working_dir / "legacy-custom-table.wfstyle",
+            {
+                "styles": [
+                    {
+                        "style_id": "TableNormal",
+                        "table_accent_hex": "27685D",
+                    }
+                ]
+            },
+        )
+        self.assertEqual(derived["used_table_styles"], ["TableNormal"])
+        self.assertEqual(derived["custom_style_count"], 1)
+        self.assertEqual(
+            [
+                item["inference_label"]
+                for item in derived["used_formats"]
+                if item.get("configured") is True
+            ],
+            ["自定义表格方案"],
+        )
+        with zipfile.ZipFile(legacy_pack, "r") as archive:
+            persisted_after = json.loads(
+                archive.read("manifest.json").decode("utf-8")
+            )
+        self.assertNotIn("table_style_edit_candidate", persisted_after)
 
     def test_table_free_source_preserves_table_cells_and_text(self) -> None:
         target_structure = table_structure(self.target_document)

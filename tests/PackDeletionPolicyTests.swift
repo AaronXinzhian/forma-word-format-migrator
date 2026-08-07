@@ -120,7 +120,9 @@ struct PackDeletionPolicyTests {
             "删除唯一项后不应保留选择"
         )
 
-        let trashableURL = library.appendingPathComponent("trash-roundtrip.wfstyle")
+        let trashableURL = library.appendingPathComponent(
+            "trash-roundtrip-\(UUID().uuidString).wfstyle"
+        )
         try Data("trash-roundtrip".utf8).write(to: trashableURL)
         let trashablePack = try makePack(id: "trash-roundtrip", path: trashableURL.path)
         let validatedTrashableURL = try PackDeletionPolicy.validatedURL(

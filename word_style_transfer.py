@@ -162,6 +162,20 @@ CONTENT_PART_PATTERNS = (
     re.compile(r"^word/glossary/document\.xml$"),
 )
 
+# DOCX is a ZIP-based OPC package.  These limits are intentionally generous
+# enough for image-heavy, real-world Word documents while preventing a corrupt
+# or hostile package from making the app allocate unbounded memory.  The
+# loader keeps every part in memory, so the total uncompressed limit is the
+# most important last line of defence.
+MAX_PACKAGE_MEMBERS = 10_000
+MAX_PACKAGE_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024  # 1 GiB
+MAX_PACKAGE_MEMBER_BYTES = 512 * 1024 * 1024  # 512 MiB (large media is valid)
+MAX_PACKAGE_XML_BYTES = 64 * 1024 * 1024  # 64 MiB per XML/relationships part
+MAX_PACKAGE_COMPRESSION_RATIO = 1000
+COMPRESSION_RATIO_MIN_BYTES = 1024 * 1024
+MAX_PACKAGE_MEMBER_NAME_BYTES = 1024
+ALLOWED_PACKAGE_COMPRESSIONS = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+
 
 class TransferError(RuntimeError):
     """User-facing transfer error."""
@@ -242,6 +256,108 @@ class Package:
     order: List[str]
 
 
+def _is_xml_package_part(name: str) -> bool:
+    lowered = name.casefold()
+    return lowered.endswith(".xml") or lowered.endswith(".rels")
+
+
+def _validate_package_member_name(name: str, role: str) -> None:
+    if not name:
+        raise TransferError("%s包含空名称的异常条目。" % role)
+    if len(name.encode("utf-8")) > MAX_PACKAGE_MEMBER_NAME_BYTES:
+        raise TransferError(
+            "%s包含名称过长的异常条目（最多 %d 字节）。"
+            % (role, MAX_PACKAGE_MEMBER_NAME_BYTES)
+        )
+    if any(ord(character) < 32 or ord(character) == 127 for character in name):
+        raise TransferError("%s包含带控制字符的异常条目。" % role)
+    if "\\" in name:
+        raise TransferError("%s包含使用反斜杠的异常条目：%s" % (role, name))
+    if name.startswith("/") or re.match(r"^[A-Za-z]:", name):
+        raise TransferError("%s包含绝对路径条目：%s" % (role, name))
+
+    # Empty components allow ambiguous spellings such as word//styles.xml.
+    # A final empty component is permitted only for an explicit directory.
+    parts = name.split("/")
+    components = parts[:-1] if name.endswith("/") else parts
+    if not components or any(part in {"", ".", ".."} for part in components):
+        raise TransferError("%s包含不安全的路径条目：%s" % (role, name))
+
+
+def validate_package_members(
+    members: Sequence[zipfile.ZipInfo], role: str
+) -> None:
+    """Validate ZIP metadata before any member is decompressed or tested."""
+
+    if len(members) > MAX_PACKAGE_MEMBERS:
+        raise TransferError(
+            "%s包含过多压缩条目（%d 个，最多允许 %d 个）。"
+            % (role, len(members), MAX_PACKAGE_MEMBERS)
+        )
+
+    seen: Set[str] = set()
+    total_uncompressed = 0
+    for info in members:
+        name = info.filename
+        _validate_package_member_name(name, role)
+        if name in seen:
+            raise TransferError("%s包含重复条目：%s" % (role, name))
+        seen.add(name)
+
+        if info.flag_bits & 0x1:
+            raise TransferError(
+                "%s包含加密条目，无法安全读取：%s" % (role, name)
+            )
+        if info.compress_type not in ALLOWED_PACKAGE_COMPRESSIONS:
+            raise TransferError(
+                "%s包含 Word 不支持的压缩方式：%s" % (role, name)
+            )
+        if info.file_size < 0 or info.compress_size < 0:
+            raise TransferError("%s包含大小信息异常的条目：%s" % (role, name))
+
+        if info.is_dir():
+            if info.file_size != 0 or info.compress_size != 0:
+                raise TransferError("%s包含带数据的异常目录条目：%s" % (role, name))
+            continue
+
+        if info.file_size > MAX_PACKAGE_MEMBER_BYTES:
+            raise TransferError(
+                "%s中的单个文件过大（%s，最多允许 512 MiB）：%s"
+                % (role, _human_size(info.file_size), name)
+            )
+        if _is_xml_package_part(name) and info.file_size > MAX_PACKAGE_XML_BYTES:
+            raise TransferError(
+                "%s中的 XML 部件过大（%s，最多允许 64 MiB）：%s"
+                % (role, _human_size(info.file_size), name)
+            )
+
+        total_uncompressed += info.file_size
+        if total_uncompressed > MAX_PACKAGE_UNCOMPRESSED_BYTES:
+            raise TransferError(
+                "%s解压后的总大小过大（最多允许 1 GiB）。" % role
+            )
+
+        if info.file_size >= COMPRESSION_RATIO_MIN_BYTES:
+            if info.compress_size == 0:
+                raise TransferError(
+                    "%s包含压缩率异常的条目：%s" % (role, name)
+                )
+            ratio = info.file_size / info.compress_size
+            if ratio > MAX_PACKAGE_COMPRESSION_RATIO:
+                raise TransferError(
+                    "%s包含压缩率异常的条目（约 %.0f:1，最多允许 %d:1）：%s"
+                    % (role, ratio, MAX_PACKAGE_COMPRESSION_RATIO, name)
+                )
+
+
+def _human_size(size: int) -> str:
+    if size >= 1024 * 1024:
+        return "%.1f MiB" % (size / (1024 * 1024))
+    if size >= 1024:
+        return "%.1f KiB" % (size / 1024)
+    return "%d B" % size
+
+
 def load_package(path: Path, role: str) -> Package:
     if not path.exists():
         raise TransferError("%s不存在：%s" % (role, path))
@@ -255,14 +371,14 @@ def load_package(path: Path, role: str) -> Package:
     infos: Dict[str, zipfile.ZipInfo] = {}
     order: List[str] = []
     with zipfile.ZipFile(str(path), "r") as archive:
+        member_list = archive.infolist()
+        validate_package_members(member_list, role)
         bad = archive.testzip()
         if bad:
             raise TransferError("%s压缩包已损坏，首个异常条目：%s" % (role, bad))
-        for info in archive.infolist():
+        for info in member_list:
             if info.is_dir():
                 continue
-            if info.filename in entries:
-                raise TransferError("%s包含重复条目：%s" % (role, info.filename))
             entries[info.filename] = archive.read(info.filename)
             infos[info.filename] = info
             order.append(info.filename)
@@ -339,7 +455,11 @@ def _read_outline(style_node: etree._Element) -> Optional[int]:
         value = int(raw) if raw is not None else None
     except ValueError:
         return None
-    return value if value is not None and 0 <= value <= 8 else None
+    # Word uses 0..8 for Heading 1..9 and the explicit value 9 for
+    # "Body Text".  Returning 9 here is important even though callers do not
+    # treat it as a heading: it must stop a basedOn chain from inheriting an
+    # ancestor heading level.
+    return value if value is not None and 0 <= value <= 9 else None
 
 
 def build_style_catalog(styles_bytes: bytes, document_bytes: bytes) -> StyleCatalog:
@@ -422,8 +542,13 @@ def build_style_catalog(styles_bytes: bytes, document_bytes: bytes) -> StyleCata
         if info is None:
             return None
         if info.own_outline_level is not None:
-            resolved_outline[style_id] = info.own_outline_level
-            return info.own_outline_level
+            value = (
+                info.own_outline_level
+                if 0 <= info.own_outline_level <= 8
+                else None
+            )
+            resolved_outline[style_id] = value
+            return value
         if info.based_on:
             value = resolve_outline(info.based_on, trail | {style_id})
             resolved_outline[style_id] = value
@@ -2599,6 +2724,11 @@ class TransferStats:
     heading_levels_demoted: int = 0
     heading_level9_unchanged: int = 0
     heading_numbering_start: Optional[int] = None
+    style_list_paragraphs_materialized: int = 0
+    body_list_paragraphs_preserved: int = 0
+    target_numbering_definitions_imported: int = 0
+    target_numbering_abstracts_imported: int = 0
+    target_picture_bullets_imported: int = 0
     sections_updated: int = 0
     paragraph_properties_removed: int = 0
     run_properties_removed: int = 0
@@ -2607,6 +2737,14 @@ class TransferStats:
     source_format_parts_copied: int = 0
     dependent_parts_copied: int = 0
     settings_items_imported: int = 0
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class BodyNumberingMergeResult:
+    """Target list instances copied into the source-owned numbering system."""
+
+    num_id_map: Dict[str, str] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
 
@@ -2644,6 +2782,42 @@ def _set_paragraph_numbering(
     num_id = etree.SubElement(num_pr, qn(W_NS, "numId"))
     num_id.set(qn(W_NS, "val"), rule.num_id)
     _ordered_insert(paragraph_properties, num_pr, PPR_CHILD_ORDER)
+
+
+def _remapped_body_numbering(
+    original: etree._Element,
+    num_id_map: Dict[str, str],
+) -> Optional[etree._Element]:
+    """Clone one semantic list reference and point it at an imported instance.
+
+    A direct ``w:numPr`` is content semantics, not merely visual paragraph
+    formatting.  Its ``w:numId`` cannot, however, survive a wholesale
+    numbering-part replacement: the same numeric ID can describe a completely
+    different list in the format source.  Only references whose definitions
+    were deliberately merged are restored here.
+    """
+    num_id = original.find("w:numId", namespaces=NS)
+    old_num_id = _word_value(num_id)
+    mapped_num_id = num_id_map.get(old_num_id or "")
+    if num_id is None or mapped_num_id is None:
+        return None
+    restored = copy.deepcopy(original)
+    restored_num_id = restored.find("w:numId", namespaces=NS)
+    if restored_num_id is None:  # Defensive; the original was checked above.
+        return None
+    restored_num_id.set(qn(W_NS, "val"), mapped_num_id)
+    return restored
+
+
+def _replace_direct_numbering(
+    paragraph_properties: etree._Element,
+    replacement: Optional[etree._Element],
+) -> None:
+    existing = paragraph_properties.find("w:numPr", namespaces=NS)
+    if existing is not None:
+        paragraph_properties.remove(existing)
+    if replacement is not None:
+        _ordered_insert(paragraph_properties, replacement, PPR_CHILD_ORDER)
 
 
 def _set_heading_paragraph_indent(
@@ -3079,6 +3253,7 @@ def clean_content_xml(
     ] = None,
     heading_level_shift: int = 0,
     table_no_indent_styles: Optional[Dict[str, str]] = None,
+    body_numbering_map: Optional[Dict[str, str]] = None,
 ) -> bytes:
     root = parse_xml(data, label)
     heading_counters: Dict[int, int] = {}
@@ -3086,6 +3261,7 @@ def clean_content_xml(
     heading_level_shift = max(0, min(8, int(heading_level_shift)))
     preserve_target_table_formatting = not source_catalog.used_table_styles
     table_no_indent_styles = table_no_indent_styles or {}
+    body_numbering_map = body_numbering_map or {}
 
     for paragraph in root.xpath("//w:p", namespaces=NS):
         stats.paragraphs_seen += 1
@@ -3099,7 +3275,11 @@ def clean_content_xml(
         mapped_style_id: Optional[str] = None
         target_outline: Optional[int] = None
         desired_outline: Optional[int] = None
+        original_num_pr: Optional[etree._Element] = None
         if ppr is not None:
+            direct_num_pr = ppr.find("w:numPr", namespaces=NS)
+            if direct_num_pr is not None:
+                original_num_pr = copy.deepcopy(direct_num_pr)
             pstyle = ppr.find("w:pStyle", namespaces=NS)
             if pstyle is not None:
                 old = pstyle.get(qn(W_NS, "val"))
@@ -3144,6 +3324,16 @@ def clean_content_xml(
                             stats.heading_levels_demoted += 1
                 else:
                     ppr.remove(pstyle)
+            if target_outline is None:
+                direct_outline = ppr.find("w:outlineLvl", namespaces=NS)
+                direct_outline_level = _safe_int(
+                    _word_value(direct_outline)
+                )
+                if (
+                    direct_outline_level is not None
+                    and 0 <= direct_outline_level <= 8
+                ):
+                    target_outline = direct_outline_level
             if not inside_preserved_table:
                 stats.paragraph_properties_removed += _remove_children_except(
                     ppr, {"pStyle", "sectPr"}
@@ -3199,6 +3389,28 @@ def clean_content_xml(
                 if heading_indent:
                     _set_heading_paragraph_indent(ppr, heading_indent)
                     stats.heading_indents_applied += 1
+            elif original_num_pr is not None:
+                # Ordinary lists remain target-owned content semantics.  A
+                # target heading's direct numbering is intentionally not
+                # restored: the source heading system (numbered or plain) is
+                # authoritative for headings.
+                restored_num_pr = (
+                    _remapped_body_numbering(
+                        original_num_pr, body_numbering_map
+                    )
+                    if target_outline is None
+                    else None
+                )
+                _replace_direct_numbering(ppr, restored_num_pr)
+                restored_num_id = (
+                    _word_value(
+                        restored_num_pr.find("w:numId", namespaces=NS)
+                    )
+                    if restored_num_pr is not None
+                    else None
+                )
+                if restored_num_id not in {None, "0"}:
+                    stats.body_list_paragraphs_preserved += 1
 
         if inside_table:
             effective_style_id = (
@@ -3701,6 +3913,587 @@ def transfer_format_parts(
     target_entries["[Content_Types].xml"] = serialize_xml(target_ct)
 
 
+NUMBERING_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument."
+    "wordprocessingml.numbering+xml"
+)
+
+
+NUMPR_CHILD_ORDER = ("ilvl", "numId", "numberingChange", "ins")
+
+
+def _merge_num_pr_children(
+    destination: Dict[str, etree._Element],
+    num_pr: Optional[etree._Element],
+) -> None:
+    if num_pr is None:
+        return
+    for child in num_pr:
+        destination[local_name(child)] = copy.deepcopy(child)
+
+
+def _effective_target_num_pr(
+    paragraph: etree._Element,
+    styles_root: etree._Element,
+    target_catalog: StyleCatalog,
+) -> Tuple[Optional[etree._Element], bool]:
+    """Resolve docDefaults, basedOn and direct numPr child-by-child.
+
+    Word list styles frequently put ``w:numId`` on a base style and only an
+    ``w:ilvl`` override on a derived style or paragraph.  Treating ``numPr`` as
+    one replace-only property loses that inheritance, so the two semantic
+    children are resolved independently here.
+    """
+    ppr = paragraph.find("w:pPr", namespaces=NS)
+    direct = ppr.find("w:numPr", namespaces=NS) if ppr is not None else None
+    pstyle = (
+        _word_value(ppr.find("w:pStyle", namespaces=NS))
+        if ppr is not None
+        else None
+    )
+    style_id = pstyle or target_catalog.fallback("paragraph")
+    nodes = _nodes_by_style_id(styles_root)
+    chain: List[etree._Element] = []
+    current = style_id or ""
+    seen: Set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        style = nodes.get(current)
+        if style is None:
+            break
+        chain.append(style)
+        current = _word_value(style.find("w:basedOn", namespaces=NS)) or ""
+
+    properties: Dict[str, etree._Element] = {}
+    defaults = styles_root.find(
+        "w:docDefaults/w:pPrDefault/w:pPr/w:numPr", namespaces=NS
+    )
+    _merge_num_pr_children(properties, defaults)
+    style_contributed = False
+    for style in reversed(chain):
+        style_num_pr = style.find("w:pPr/w:numPr", namespaces=NS)
+        if style_num_pr is not None:
+            style_contributed = True
+            _merge_num_pr_children(properties, style_num_pr)
+    _merge_num_pr_children(properties, direct)
+
+    num_id = properties.get("numId")
+    if num_id is None or _word_value(num_id) is None:
+        return None, False
+    raw_num_id = _word_value(num_id)
+    if raw_num_id != "0" and not re.fullmatch(r"\d+", raw_num_id or ""):
+        return None, False
+
+    level = properties.get("ilvl")
+    parsed_level = _safe_int(_word_value(level))
+    if raw_num_id != "0" and (
+        parsed_level is None or not 0 <= parsed_level <= 8
+    ):
+        level = etree.Element(qn(W_NS, "ilvl"))
+        level.set(qn(W_NS, "val"), "0")
+        properties["ilvl"] = level
+
+    result = etree.Element(qn(W_NS, "numPr"))
+    for name in NUMPR_CHILD_ORDER:
+        child = properties.get(name)
+        if child is not None:
+            result.append(copy.deepcopy(child))
+    for name, child in properties.items():
+        if name not in NUMPR_CHILD_ORDER:
+            result.append(copy.deepcopy(child))
+    inherited = style_contributed and (
+        direct is None
+        or _word_value(direct.find("w:numId", namespaces=NS)) is None
+        or _word_value(direct.find("w:ilvl", namespaces=NS)) is None
+    )
+    return result, inherited
+
+
+def materialize_target_body_numbering(
+    target_entries: Dict[str, bytes],
+    target_catalog: StyleCatalog,
+    stats: TransferStats,
+) -> int:
+    """Turn effective target body-list styles into direct semantic numPr.
+
+    The target paragraph style is about to be replaced by the format source,
+    so an inherited list association must first become paragraph-owned.  This
+    deliberately skips outline paragraphs; headings continue to obey the
+    source heading system.
+    """
+    styles_data = target_entries.get("word/styles.xml")
+    if styles_data is None:
+        return 0
+    styles_root = parse_xml(styles_data, "目标文件 styles.xml")
+    materialized_lists = 0
+    for name in sorted(target_entries):
+        if not is_content_part(name):
+            continue
+        root = parse_xml(target_entries[name], name)
+        changed = False
+        for paragraph in root.xpath("//w:p", namespaces=NS):
+            ppr = paragraph.find("w:pPr", namespaces=NS)
+            pstyle = (
+                _word_value(ppr.find("w:pStyle", namespaces=NS))
+                if ppr is not None
+                else None
+            )
+            outline = target_catalog.resolved_outline.get(pstyle or "")
+            direct_outline = (
+                _safe_int(
+                    _word_value(ppr.find("w:outlineLvl", namespaces=NS))
+                )
+                if ppr is not None
+                else None
+            )
+            if outline is not None or (
+                direct_outline is not None and 0 <= direct_outline <= 8
+            ):
+                continue
+
+            effective, inherited = _effective_target_num_pr(
+                paragraph, styles_root, target_catalog
+            )
+            if effective is None:
+                continue
+            existing = (
+                ppr.find("w:numPr", namespaces=NS)
+                if ppr is not None
+                else None
+            )
+            if existing is not None and serialize_xml(existing) == serialize_xml(effective):
+                continue
+            if ppr is None:
+                ppr = etree.Element(qn(W_NS, "pPr"))
+                paragraph.insert(0, ppr)
+            _replace_direct_numbering(ppr, effective)
+            changed = True
+            num_id = _word_value(effective.find("w:numId", namespaces=NS))
+            if inherited and num_id not in {None, "0"}:
+                materialized_lists += 1
+        if changed:
+            target_entries[name] = serialize_xml(root)
+    stats.style_list_paragraphs_materialized += materialized_lists
+    return materialized_lists
+
+
+def _direct_content_num_ids(
+    entries: Dict[str, bytes],
+    target_catalog: Optional[StyleCatalog] = None,
+) -> Set[str]:
+    """Collect concrete list instances referenced directly by target content."""
+    result: Set[str] = set()
+    for name in sorted(entries):
+        if not is_content_part(name):
+            continue
+        root = parse_xml(entries[name], name)
+        for paragraph in root.xpath("//w:p[w:pPr/w:numPr]", namespaces=NS):
+            ppr = paragraph.find("w:pPr", namespaces=NS)
+            if ppr is None:
+                continue
+            pstyle = _word_value(ppr.find("w:pStyle", namespaces=NS))
+            outline = (
+                target_catalog.resolved_outline.get(pstyle or "")
+                if target_catalog is not None
+                else None
+            )
+            if outline is None:
+                outline = _safe_int(
+                    _word_value(ppr.find("w:outlineLvl", namespaces=NS))
+                )
+            if outline is not None and 0 <= outline <= 8:
+                continue
+            value = _word_value(ppr.find("w:numPr/w:numId", namespaces=NS))
+            if value is not None:
+                result.add(value)
+    return result
+
+
+def _fresh_numeric_id(
+    used: Set[str],
+    minimum: int,
+    preferred: Optional[str] = None,
+) -> str:
+    if preferred is not None and re.fullmatch(r"\d+", preferred):
+        parsed_preferred = int(preferred)
+        if parsed_preferred >= minimum and preferred not in used:
+            used.add(preferred)
+            return preferred
+    numeric = [int(value) for value in used if re.fullmatch(r"\d+", value)]
+    candidate = max([minimum - 1] + numeric) + 1
+    while str(candidate) in used:
+        candidate += 1
+    result = str(candidate)
+    used.add(result)
+    return result
+
+
+def _numbering_part(
+    entries: Dict[str, bytes],
+) -> Tuple[Optional[str], Optional[etree._Element]]:
+    _rels, roles = collect_format_relationships(entries)
+    record = roles.get("numbering")
+    part = record[0] if record is not None else ROLE_FALLBACK_PARTS["numbering"]
+    if part not in entries:
+        return None, None
+    return part, parse_xml(entries[part], part)
+
+
+def _ensure_numbering_part(
+    entries: Dict[str, bytes],
+) -> Tuple[str, etree._Element]:
+    rels_path = "word/_rels/document.xml.rels"
+    rels_root, roles = collect_format_relationships(entries)
+    record = roles.get("numbering")
+    part = record[0] if record is not None else ROLE_FALLBACK_PARTS["numbering"]
+    if part in entries:
+        root = parse_xml(entries[part], part)
+    else:
+        root = etree.Element(qn(W_NS, "numbering"), nsmap={"w": W_NS})
+        entries[part] = serialize_xml(root)
+
+    if record is None:
+        rel = etree.SubElement(rels_root, qn(PKG_REL_NS, "Relationship"))
+        rel.set("Id", unique_relationship_id(rels_root, "rIdFmtNumbering"))
+        rel.set("Type", R_NS + "/numbering")
+        rel.set(
+            "Target", relative_relationship_target("word/document.xml", part)
+        )
+        entries[rels_path] = serialize_xml(rels_root)
+
+    content_types = parse_content_types(entries, "格式源")
+    ensure_content_type_override(content_types, part, NUMBERING_CONTENT_TYPE)
+    entries["[Content_Types].xml"] = serialize_xml(content_types)
+    return part, root
+
+
+def _insert_numbering_root_child(
+    root: etree._Element,
+    node: etree._Element,
+) -> None:
+    name = local_name(node)
+    allowed_after: Dict[str, Set[str]] = {
+        "numPicBullet": {"numPicBullet"},
+        "abstractNum": {"numPicBullet", "abstractNum"},
+        "num": {"numPicBullet", "abstractNum", "num"},
+    }
+    predecessors = allowed_after.get(name)
+    if predecessors is None:
+        root.append(node)
+        return
+    insertion = 0
+    for index, child in enumerate(root):
+        if local_name(child) in predecessors:
+            insertion = index + 1
+    root.insert(insertion, node)
+
+
+def _sanitize_imported_list_abstract(
+    abstract: etree._Element,
+    abstract_id: str,
+) -> etree._Element:
+    """Materialize list appearance without binding it to target style IDs."""
+    result = copy.deepcopy(abstract)
+    result.set(qn(W_NS, "abstractNumId"), abstract_id)
+    for tag in ("numStyleLink", "styleLink"):
+        for node in list(result.findall("w:%s" % tag, namespaces=NS)):
+            result.remove(node)
+    for node in result.xpath("./w:lvl/w:pStyle", namespaces=NS):
+        parent = node.getparent()
+        if parent is not None:
+            parent.remove(node)
+    return result
+
+
+def _relationship_attributes(root: etree._Element) -> Set[str]:
+    result: Set[str] = set()
+    prefix = "{%s}" % R_NS
+    for node in root.iter():
+        for attribute, value in node.attrib.items():
+            if attribute.startswith(prefix) and value:
+                result.add(value)
+    return result
+
+
+def _copy_numbering_relationships(
+    picture_nodes: Sequence[etree._Element],
+    target_entries: Dict[str, bytes],
+    source_entries: Dict[str, bytes],
+    target_numbering_part: str,
+    source_numbering_part: str,
+    stats: TransferStats,
+) -> None:
+    referenced_ids: Set[str] = set()
+    for node in picture_nodes:
+        referenced_ids.update(_relationship_attributes(node))
+    if not referenced_ids:
+        return
+
+    target_rels_path = relationship_part_path(target_numbering_part)
+    target_rels = parse_relationship_root(target_entries, target_rels_path)
+    target_by_id = {
+        str(node.get("Id")): node
+        for node in target_rels.findall(qn(PKG_REL_NS, "Relationship"))
+        if node.get("Id")
+    }
+    missing = sorted(referenced_ids.difference(target_by_id))
+    if missing:
+        raise TransferError(
+            "目标文档的图片项目符号关系不完整：%s。" % "、".join(missing)
+        )
+
+    source_rels_path = relationship_part_path(source_numbering_part)
+    source_rels = parse_relationship_root(source_entries, source_rels_path)
+    target_content_types = parse_content_types(target_entries, "内容目标文件")
+    source_content_types = parse_content_types(source_entries, "格式源")
+    copied: Dict[str, str] = {}
+    relationship_map: Dict[str, str] = {}
+
+    for old_id in sorted(referenced_ids):
+        target_rel = target_by_id[old_id]
+        new_id = unique_relationship_id(source_rels, "rIdTargetList")
+        relationship_map[old_id] = new_id
+        new_rel = etree.SubElement(
+            source_rels, qn(PKG_REL_NS, "Relationship")
+        )
+        new_rel.set("Id", new_id)
+        new_rel.set("Type", target_rel.get("Type", ""))
+        target_mode = target_rel.get("TargetMode")
+        target_value = target_rel.get("Target")
+        if target_mode == "External":
+            if target_value is not None:
+                new_rel.set("Target", target_value)
+            new_rel.set("TargetMode", "External")
+            continue
+        if not target_value:
+            raise TransferError("目标文档的图片项目符号关系缺少目标。")
+        dependency_source = resolve_relationship_target(
+            target_numbering_part, target_value
+        )
+        if dependency_source not in target_entries:
+            raise TransferError(
+                "目标文档的图片项目符号资源缺失：%s。" % dependency_source
+            )
+        dependency_destination = dependency_source
+        if (
+            dependency_destination in source_entries
+            and source_entries[dependency_destination]
+            != target_entries[dependency_source]
+        ):
+            dependency_destination = unique_part_name(
+                source_entries, dependency_destination
+            )
+        dependency_destination = copy_part_graph(
+            target_entries,
+            source_entries,
+            dependency_source,
+            dependency_destination,
+            target_content_types,
+            source_content_types,
+            copied,
+            stats,
+            is_primary=False,
+        )
+        new_rel.set(
+            "Target",
+            relative_relationship_target(
+                source_numbering_part, dependency_destination
+            ),
+        )
+
+    for picture in picture_nodes:
+        prefix = "{%s}" % R_NS
+        for node in picture.iter():
+            for attribute, value in list(node.attrib.items()):
+                if attribute.startswith(prefix) and value in relationship_map:
+                    node.set(attribute, relationship_map[value])
+
+    source_entries[source_rels_path] = serialize_xml(source_rels)
+    source_entries["[Content_Types].xml"] = serialize_xml(source_content_types)
+
+
+def merge_target_body_numbering(
+    source_entries: Dict[str, bytes],
+    target_entries: Dict[str, bytes],
+    stats: TransferStats,
+    target_catalog: Optional[StyleCatalog] = None,
+) -> BodyNumberingMergeResult:
+    """Import target-owned list instances under collision-free numbering IDs.
+
+    The output style system comes from ``source_entries``, but ordinary lists
+    belong to the target's content.  Every referenced concrete ``w:num`` gets
+    its own fresh instance so separate target sequences do not accidentally
+    continue a source heading/list sequence that happens to use the same ID.
+    """
+    referenced = _direct_content_num_ids(target_entries, target_catalog)
+    result = BodyNumberingMergeResult()
+    if "0" in referenced:
+        # numId=0 is Word's explicit numbering cancellation and has no concrete
+        # definition.  Keeping it protects a paragraph from a numbered style.
+        result.num_id_map["0"] = "0"
+    requested = {
+        value for value in referenced if value != "0" and re.fullmatch(r"\d+", value)
+    }
+    invalid = sorted(referenced.difference(requested).difference({"0"}))
+    if invalid:
+        result.warnings.append(
+            "目标文档包含无法识别的列表编号引用，已跳过：%s。"
+            % "、".join(invalid)
+        )
+    if not requested:
+        return result
+
+    target_part, target_root = _numbering_part(target_entries)
+    if target_part is None or target_root is None:
+        result.warnings.append(
+            "目标文档包含列表段落，但缺少 numbering.xml；这些损坏的列表引用未保留。"
+        )
+        return result
+
+    target_abstracts = {
+        str(node.get(qn(W_NS, "abstractNumId"))): node
+        for node in target_root.findall("w:abstractNum", namespaces=NS)
+        if node.get(qn(W_NS, "abstractNumId")) is not None
+    }
+    target_nums = {
+        str(node.get(qn(W_NS, "numId"))): node
+        for node in target_root.findall("w:num", namespaces=NS)
+        if node.get(qn(W_NS, "numId")) is not None
+    }
+    target_styles: Dict[str, etree._Element] = {}
+    if "word/styles.xml" in target_entries:
+        target_styles_root = parse_xml(
+            target_entries["word/styles.xml"], "目标文件 styles.xml"
+        )
+        target_styles = {
+            str(node.get(qn(W_NS, "styleId"))): node
+            for node in target_styles_root.findall("w:style", namespaces=NS)
+            if node.get(qn(W_NS, "styleId"))
+        }
+
+    source_part, source_root = _ensure_numbering_part(source_entries)
+    used_num_ids = {
+        str(node.get(qn(W_NS, "numId")))
+        for node in source_root.findall("w:num", namespaces=NS)
+        if node.get(qn(W_NS, "numId")) is not None
+    }
+    used_abstract_ids = {
+        str(node.get(qn(W_NS, "abstractNumId")))
+        for node in source_root.findall("w:abstractNum", namespaces=NS)
+        if node.get(qn(W_NS, "abstractNumId")) is not None
+    }
+    used_picture_ids = {
+        str(node.get(qn(W_NS, "numPicBulletId")))
+        for node in source_root.findall("w:numPicBullet", namespaces=NS)
+        if node.get(qn(W_NS, "numPicBulletId")) is not None
+    }
+    target_pictures = {
+        str(node.get(qn(W_NS, "numPicBulletId"))): node
+        for node in target_root.findall("w:numPicBullet", namespaces=NS)
+        if node.get(qn(W_NS, "numPicBulletId")) is not None
+    }
+
+    abstract_id_map: Dict[str, str] = {}
+    picture_id_map: Dict[str, str] = {}
+    abstract_clones: List[etree._Element] = []
+    num_clones: List[etree._Element] = []
+    picture_clones: List[etree._Element] = []
+    unresolved: List[str] = []
+
+    for old_num_id in sorted(requested, key=lambda value: int(value)):
+        target_num = target_nums.get(old_num_id)
+        if target_num is None:
+            unresolved.append(old_num_id)
+            continue
+        authority = _abstract_for_num(
+            target_num, target_abstracts, target_nums, target_styles
+        )
+        if authority is None or not authority.findall("w:lvl", namespaces=NS):
+            unresolved.append(old_num_id)
+            continue
+        authority_id = authority.get(qn(W_NS, "abstractNumId"))
+        if authority_id is None:
+            unresolved.append(old_num_id)
+            continue
+
+        new_abstract_id = abstract_id_map.get(authority_id)
+        if new_abstract_id is None:
+            new_abstract_id = _fresh_numeric_id(
+                used_abstract_ids, 0, preferred=authority_id
+            )
+            abstract_id_map[authority_id] = new_abstract_id
+            abstract_clone = _sanitize_imported_list_abstract(
+                authority, new_abstract_id
+            )
+            for picture_ref in abstract_clone.xpath(
+                ".//w:lvlPicBulletId", namespaces=NS
+            ):
+                old_picture_id = _word_value(picture_ref)
+                if not old_picture_id:
+                    continue
+                new_picture_id = picture_id_map.get(old_picture_id)
+                if new_picture_id is None:
+                    target_picture = target_pictures.get(old_picture_id)
+                    if target_picture is None:
+                        parent = picture_ref.getparent()
+                        if parent is not None:
+                            parent.remove(picture_ref)
+                        result.warnings.append(
+                            "目标列表引用了缺失的图片项目符号 %s，已使用其文本符号回退。"
+                            % old_picture_id
+                        )
+                        continue
+                    new_picture_id = _fresh_numeric_id(
+                        used_picture_ids, 0, preferred=old_picture_id
+                    )
+                    picture_id_map[old_picture_id] = new_picture_id
+                    picture_clone = copy.deepcopy(target_picture)
+                    picture_clone.set(
+                        qn(W_NS, "numPicBulletId"), new_picture_id
+                    )
+                    picture_clones.append(picture_clone)
+                picture_ref.set(qn(W_NS, "val"), new_picture_id)
+            abstract_clones.append(abstract_clone)
+
+        new_num_id = _fresh_numeric_id(used_num_ids, 1)
+        num_clone = copy.deepcopy(target_num)
+        num_clone.set(qn(W_NS, "numId"), new_num_id)
+        abstract_reference = num_clone.find("w:abstractNumId", namespaces=NS)
+        if abstract_reference is None:
+            unresolved.append(old_num_id)
+            continue
+        abstract_reference.set(qn(W_NS, "val"), new_abstract_id)
+        num_clones.append(num_clone)
+        result.num_id_map[old_num_id] = new_num_id
+
+    if picture_clones:
+        _copy_numbering_relationships(
+            picture_clones,
+            target_entries,
+            source_entries,
+            target_part,
+            source_part,
+            stats,
+        )
+    for node in picture_clones:
+        _insert_numbering_root_child(source_root, node)
+    for node in abstract_clones:
+        _insert_numbering_root_child(source_root, node)
+    for node in num_clones:
+        _insert_numbering_root_child(source_root, node)
+    source_entries[source_part] = serialize_xml(source_root)
+
+    stats.target_numbering_definitions_imported += len(num_clones)
+    stats.target_numbering_abstracts_imported += len(abstract_clones)
+    stats.target_picture_bullets_imported += len(picture_clones)
+    if unresolved:
+        result.warnings.append(
+            "目标文档中部分列表定义缺失或无法解析，已跳过编号实例：%s。"
+            % "、".join(sorted(unresolved, key=lambda value: int(value)))
+        )
+    return result
+
+
 def write_package(package: Package, entries: Dict[str, bytes], output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
@@ -3946,6 +4739,11 @@ def transfer(
     )
 
     stats = TransferStats()
+    materialize_target_body_numbering(target_entries, target_catalog, stats)
+    body_numbering = merge_target_body_numbering(
+        source_entries, target_entries, stats, target_catalog
+    )
+    stats.warnings.extend(body_numbering.warnings)
     if preserve_target_tables:
         stats.warnings.append(
             "格式源未使用表格样式，已保留目标文档的表格外观，并取消表格单元格中的两字符首行缩进。"
@@ -3983,6 +4781,7 @@ def transfer(
                 else 0
             ),
             table_no_indent_styles=table_no_indent_styles,
+            body_numbering_map=body_numbering.num_id_map,
         )
         stats.content_parts_cleaned += 1
 
@@ -3990,6 +4789,23 @@ def transfer(
         stats.warnings.append(
             "Word 最多支持标题9；正文中的 %d 个标题9已保持原级别。"
             % stats.heading_level9_unchanged
+        )
+
+    if stats.body_list_paragraphs_preserved:
+        inherited_detail = (
+            "，其中 %d 个来自目标段落样式继承"
+            % stats.style_list_paragraphs_materialized
+            if stats.style_list_paragraphs_materialized
+            else ""
+        )
+        stats.warnings.append(
+            "已保留目标文档中的 %d 个普通编号或项目符号段落%s，"
+            "并隔离导入 %d 个列表实例以避免与模板编号冲突。"
+            % (
+                stats.body_list_paragraphs_preserved,
+                inherited_detail,
+                stats.target_numbering_definitions_imported,
+            )
         )
 
     set_heading_numbering_start_override(
