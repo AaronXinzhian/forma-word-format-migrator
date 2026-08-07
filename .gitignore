@@ -1,0 +1,54 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+.coverage
+
+# Local application builds and signed release bundles.
+build/
+build-v*
+release/
+release-v*/
+package/
+*.app/
+*.dSYM/
+*.swiftmodule
+*.pcm
+*.o
+**/bin/
+**/obj/
+
+# Local packages and real documents must never enter source control.
+*.zip
+*.wfstyle
+*.docx
+*.docm
+*.dotx
+*.dotm
+*.pdf
+!tests/fixtures/*.docx
+!tests/fixtures/*.docm
+!tests/fixtures/*.dotx
+!tests/fixtures/*.dotm
+
+# Generated visual, smoke-test, and extracted-app workspaces.
+tests/app-build/
+tests/app-smoke-*/
+tests/debug-*/
+tests/extract-*/
+tests/final-*/
+tests/icon-preview/
+tests/numbering-edge-*/
+tests/numbering-format-check/
+tests/numbering-visual*/
+tests/out/
+tests/package-*/
+tests/render/
+tests/ui-build/
+tests/ui-library/
+tests/ui-runtime-*/
+tests/visual-*/
+
+# Superseded pre-Swift launchers kept only in the local archive.
+Word格式迁移工具-test.app/
+Word格式迁移工具.applescript

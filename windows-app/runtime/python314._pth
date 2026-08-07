@@ -1,0 +1,5 @@
+python314.zip
+.
+Lib\site-packages
+..\resources
+import site
