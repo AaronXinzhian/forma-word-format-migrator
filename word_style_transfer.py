@@ -752,6 +752,48 @@ HEADING_INDENT_ATTRIBUTES = (
     "hangingChars",
 )
 
+# Direct paragraph formatting is normally discarded so the imported style
+# system remains authoritative.  Headings are the narrow exception: real Word
+# templates frequently keep their visible spacing/alignment/indentation on the
+# paragraph instances instead of in the Heading style.  Persist only these
+# allow-listed, text-free attributes in a style pack.
+HEADING_SPACING_INTEGER_ATTRIBUTES = (
+    "before",
+    "beforeLines",
+    "after",
+    "afterLines",
+    "line",
+)
+HEADING_SPACING_BOOLEAN_ATTRIBUTES = (
+    "beforeAutospacing",
+    "afterAutospacing",
+)
+HEADING_SPACING_ATTRIBUTES = (
+    "before",
+    "beforeLines",
+    "beforeAutospacing",
+    "after",
+    "afterLines",
+    "afterAutospacing",
+    "line",
+    "lineRule",
+)
+LINE_SPACING_RULES = {"auto", "atLeast", "exact"}
+PARAGRAPH_ALIGNMENT_VALUES = {
+    "both",
+    "center",
+    "distribute",
+    "end",
+    "highKashida",
+    "left",
+    "lowKashida",
+    "mediumKashida",
+    "numTab",
+    "right",
+    "start",
+    "thaiDistribute",
+}
+
 RPR_CHILD_ORDER = (
     "rStyle",
     "rFonts",
@@ -935,13 +977,104 @@ def _merge_property_map(
         return
     for child in parent:
         local = local_name(child)
-        if local in {"rFonts", "spacing", "ind"} and local in destination:
+        if local == "ind":
+            destination[local] = merge_style_hierarchy_indentation(
+                destination.get(local), child
+            )
+        elif local in {"rFonts", "spacing"} and local in destination:
             merged = copy.deepcopy(destination[local])
             for attribute, value in child.attrib.items():
                 merged.set(attribute, value)
             destination[local] = merged
         else:
             destination[local] = copy.deepcopy(child)
+
+
+_INDENT_HIERARCHY_GROUPS = (
+    ("left", "start"),
+    ("leftChars", "startChars"),
+    ("right", "end"),
+    ("rightChars", "endChars"),
+    ("firstLine",),
+    ("firstLineChars",),
+    ("hanging",),
+    ("hangingChars",),
+)
+_INDENT_CHARACTER_GROUPS = {
+    "leftChars",
+    "startChars",
+    "rightChars",
+    "endChars",
+    "firstLineChars",
+    "hangingChars",
+}
+
+
+def merge_style_hierarchy_indentation(
+    inherited: Optional[etree._Element],
+    current: etree._Element,
+) -> etree._Element:
+    """Apply Word's style-hierarchy rules for ``w:ind`` attributes.
+
+    Word treats a zero character-unit value as a tombstone: it removes the
+    related character indent inherited from an earlier style and then falls
+    back to the corresponding point/twip value.  A non-zero character value
+    remains authoritative over a point value.  First-line and hanging indents
+    are mutually exclusive choices, so a later explicit choice also removes
+    the opposite choice inherited from an earlier style.
+
+    This helper resolves only an effective in-memory view.  The original XML
+    keeps zero character-unit attributes because Word needs those tombstones
+    when the style is applied to a real document.
+    """
+
+    merged = (
+        copy.deepcopy(inherited)
+        if inherited is not None
+        else etree.Element(qn(W_NS, "ind"))
+    )
+
+    def raw(local: str) -> Optional[str]:
+        return current.get(qn(W_NS, local))
+
+    def nonzero(local: str) -> bool:
+        value = _safe_int(raw(local))
+        return value is not None and value != 0
+
+    first_line_selected = (
+        raw("firstLine") is not None or nonzero("firstLineChars")
+    )
+    hanging_selected = raw("hanging") is not None or nonzero("hangingChars")
+    if first_line_selected and not hanging_selected:
+        for local in ("hanging", "hangingChars"):
+            merged.attrib.pop(qn(W_NS, local), None)
+    elif hanging_selected and not first_line_selected:
+        for local in ("firstLine", "firstLineChars"):
+            merged.attrib.pop(qn(W_NS, local), None)
+    elif first_line_selected and hanging_selected:
+        for local in ("firstLine", "firstLineChars", "hanging", "hangingChars"):
+            merged.attrib.pop(qn(W_NS, local), None)
+
+    handled: Set[str] = set()
+    for group in _INDENT_HIERARCHY_GROUPS:
+        present = [(local, raw(local)) for local in group if raw(local) is not None]
+        if not present:
+            continue
+        handled.update(group)
+        for local in group:
+            merged.attrib.pop(qn(W_NS, local), None)
+        is_character_group = any(
+            local in _INDENT_CHARACTER_GROUPS for local in group
+        )
+        for local, value in present:
+            if is_character_group and _safe_int(value) == 0:
+                continue
+            merged.set(qn(W_NS, local), str(value))
+
+    for attribute, value in current.attrib.items():
+        if etree.QName(attribute).localname not in handled:
+            merged.set(attribute, value)
+    return merged
 
 
 def _effective_style_properties(
@@ -1033,20 +1166,88 @@ def _normalize_heading_indent_profile(
     }
 
 
-def collect_heading_paragraph_indents(
+def _canonical_on_off_attribute(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = value.strip().casefold()
+    if normalized in {"1", "true", "on"}:
+        return "1"
+    if normalized in {"0", "false", "off"}:
+        return "0"
+    return None
+
+
+def _heading_spacing_profile(
+    spacing: Optional[etree._Element],
+) -> Dict[str, str]:
+    if spacing is None:
+        return {}
+    result: Dict[str, str] = {}
+    for attribute in HEADING_SPACING_INTEGER_ATTRIBUTES:
+        value = _safe_int(spacing.get(qn(W_NS, attribute)))
+        if value is not None:
+            result[attribute] = str(value)
+    for attribute in HEADING_SPACING_BOOLEAN_ATTRIBUTES:
+        value = _canonical_on_off_attribute(
+            spacing.get(qn(W_NS, attribute))
+        )
+        if value is not None:
+            result[attribute] = value
+    line_rule = spacing.get(qn(W_NS, "lineRule"))
+    if line_rule in LINE_SPACING_RULES:
+        result["lineRule"] = str(line_rule)
+    return {
+        attribute: result[attribute]
+        for attribute in HEADING_SPACING_ATTRIBUTES
+        if attribute in result
+    }
+
+
+def _heading_paragraph_property_profile(
+    paragraph_properties: Optional[etree._Element],
+) -> Dict[str, object]:
+    """Return direct, text-free heading paragraph properties."""
+    if paragraph_properties is None:
+        return {}
+    result: Dict[str, object] = {}
+    indentation = paragraph_properties.find("w:ind", namespaces=NS)
+    if indentation is not None:
+        # An explicit empty w:ind is meaningful in the same way as the legacy
+        # heading-indent collector: turn it into stable zero overrides rather
+        # than confusing it with an absent direct property.
+        result["ind"] = _normalize_heading_indent_profile(
+            _heading_indent_profile(indentation)
+        )
+    spacing = _heading_spacing_profile(
+        paragraph_properties.find("w:spacing", namespaces=NS)
+    )
+    if spacing:
+        result["spacing"] = spacing
+    alignment = _word_value(
+        paragraph_properties.find("w:jc", namespaces=NS)
+    )
+    if alignment in PARAGRAPH_ALIGNMENT_VALUES:
+        result["jc"] = alignment
+    return result
+
+
+def collect_heading_paragraph_properties(
     entries: Dict[str, bytes],
     catalog: StyleCatalog,
     style_ids: Iterable[str],
     part_names: Optional[Iterable[str]] = None,
     inherited_style_ids: Optional[Iterable[str]] = None,
     heading_authorities: Optional[Dict[int, str]] = None,
-) -> Dict[str, Dict[str, str]]:
-    """Resolve one representative direct paragraph indent per heading style.
+) -> Dict[str, Dict[str, object]]:
+    """Resolve representative direct paragraph properties per heading style.
 
-    Actual source paragraphs vote by their complete direct ``w:ind`` profile,
-    including the absence of that property.  An observed absence is meaningful:
-    it leaves the numbering level free to control list geometry.  Generated
-    Heading 4/5 styles inherit only from their authoritative immediate parent.
+    Actual source paragraphs vote independently for indentation, spacing and
+    alignment, including absence.  Independent votes preserve a stable indent
+    even if one heading has exceptional spacing (and vice versa).  An observed
+    absence is meaningful: it leaves the style and numbering level
+    authoritative.  Generated Heading 4/5 styles inherit only indentation from
+    their authoritative immediate parent; their spacing remains governed by
+    the hierarchy-completion algorithm in styles.xml.
     """
     requested = {
         str(style_id)
@@ -1059,10 +1260,9 @@ def collect_heading_paragraph_indents(
         if part_names is not None
         else [name for name in sorted(entries) if is_content_part(name)]
     )
-    votes: Dict[str, Counter[Optional[Tuple[Tuple[str, str], ...]]]] = {}
-    first_seen: Dict[
-        Tuple[str, Optional[Tuple[Tuple[str, str], ...]]], int
-    ] = {}
+    votes: Dict[str, Dict[str, Counter[Optional[object]]]] = {}
+    first_seen: Dict[Tuple[str, str, Optional[object]], int] = {}
+    observed_values: Dict[Tuple[str, str, object], object] = {}
     ordinal = 0
     for name in selected_parts:
         if name not in entries or not is_content_part(name):
@@ -1075,17 +1275,48 @@ def collect_heading_paragraph_indents(
             if style_id not in requested:
                 ordinal += 1
                 continue
-            indentation = paragraph.find("w:pPr/w:ind", namespaces=NS)
-            signature: Optional[Tuple[Tuple[str, str], ...]]
-            if indentation is None:
-                signature = None
-            else:
-                signature = tuple(_heading_indent_profile(indentation).items())
-            votes.setdefault(style_id, Counter())[signature] += 1
-            first_seen.setdefault((style_id, signature), ordinal)
+            paragraph_properties = paragraph.find("w:pPr", namespaces=NS)
+            profile = _heading_paragraph_property_profile(
+                paragraph_properties
+            )
+            raw_indent = profile.get("ind")
+            raw_spacing = profile.get("spacing")
+            components: Dict[str, Tuple[Optional[object], Optional[object]]] = {
+                "ind": (
+                    tuple(raw_indent.items())
+                    if isinstance(raw_indent, dict)
+                    else None,
+                    raw_indent if isinstance(raw_indent, dict) else None,
+                ),
+                "spacing": (
+                    tuple(raw_spacing.items())
+                    if isinstance(raw_spacing, dict)
+                    else None,
+                    raw_spacing if isinstance(raw_spacing, dict) else None,
+                ),
+                "jc": (
+                    profile.get("jc")
+                    if isinstance(profile.get("jc"), str)
+                    else None,
+                    profile.get("jc")
+                    if isinstance(profile.get("jc"), str)
+                    else None,
+                ),
+            }
+            style_votes = votes.setdefault(style_id, {})
+            for property_name, (signature, value) in components.items():
+                style_votes.setdefault(property_name, Counter())[signature] += 1
+                first_seen.setdefault(
+                    (style_id, property_name, signature), ordinal
+                )
+                if signature is not None and value is not None:
+                    observed_values.setdefault(
+                        (style_id, property_name, signature),
+                        copy.deepcopy(value),
+                    )
             ordinal += 1
 
-    result: Dict[str, Dict[str, str]] = {}
+    result: Dict[str, Dict[str, object]] = {}
     ordered_styles = sorted(
         requested,
         key=lambda style_id: (
@@ -1096,23 +1327,29 @@ def collect_heading_paragraph_indents(
         ),
     )
     for style_id in ordered_styles:
-        profile: Optional[Dict[str, str]] = None
+        profile: Dict[str, object] = {}
         observed = False
-        counter = votes.get(style_id)
-        if counter:
+        style_votes = votes.get(style_id)
+        if style_votes:
             observed = True
-            winning = min(
-                counter,
-                key=lambda signature: (
-                    -counter[signature],
-                    first_seen.get((style_id, signature), sys.maxsize),
-                    repr(signature),
-                ),
-            )
-            if winning is not None:
-                profile = dict(winning)
+            for property_name in ("ind", "spacing", "jc"):
+                counter = style_votes[property_name]
+                winning = min(
+                    counter,
+                    key=lambda signature: (
+                        -counter[signature],
+                        first_seen.get(
+                            (style_id, property_name, signature), sys.maxsize
+                        ),
+                        repr(signature),
+                    ),
+                )
+                if winning is not None:
+                    profile[property_name] = copy.deepcopy(
+                        observed_values[(style_id, property_name, winning)]
+                    )
 
-        if not observed and profile is None and style_id in inherited:
+        if not observed and not profile and style_id in inherited:
             level = catalog.resolved_outline.get(style_id)
             parent_style = (
                 heading_authorities.get(level - 1)
@@ -1127,11 +1364,38 @@ def collect_heading_paragraph_indents(
                 )
                 parent_style = immediate[0] if immediate else None
             if parent_style in result:
-                profile = dict(result[parent_style])
+                parent_indent = result[parent_style].get("ind")
+                if isinstance(parent_indent, dict):
+                    profile = {"ind": copy.deepcopy(parent_indent)}
 
-        if profile is not None:
-            result[style_id] = _normalize_heading_indent_profile(profile)
+        if profile:
+            result[style_id] = profile
     return result
+
+
+def collect_heading_paragraph_indents(
+    entries: Dict[str, bytes],
+    catalog: StyleCatalog,
+    style_ids: Iterable[str],
+    part_names: Optional[Iterable[str]] = None,
+    inherited_style_ids: Optional[Iterable[str]] = None,
+    heading_authorities: Optional[Dict[int, str]] = None,
+) -> Dict[str, Dict[str, str]]:
+    """Compatibility view of the heading-property collector."""
+    properties = collect_heading_paragraph_properties(
+        entries,
+        catalog,
+        style_ids,
+        part_names=part_names,
+        inherited_style_ids=inherited_style_ids,
+        heading_authorities=heading_authorities,
+    )
+    return {
+        style_id: dict(indentation)
+        for style_id, profile in properties.items()
+        for indentation in [profile.get("ind")]
+        if isinstance(indentation, dict)
+    }
 
 
 def heading_paragraph_indents_from_manifest(
@@ -1159,6 +1423,97 @@ def heading_paragraph_indents_from_manifest(
             profile[name] = str(numeric)
         if profile and not invalid:
             result[style_id] = _normalize_heading_indent_profile(profile)
+    return result
+
+
+def heading_paragraph_properties_from_manifest(
+    raw: object,
+    catalog: StyleCatalog,
+    legacy_indents: object = None,
+) -> Dict[str, Dict[str, object]]:
+    """Validate direct heading properties and merge the legacy indent field.
+
+    The pack loader performs strict structural validation.  This runtime
+    decoder remains defensive as the direct CLI can call the engine with data
+    assembled by older code.
+    """
+    result: Dict[str, Dict[str, object]] = {}
+    if isinstance(raw, dict):
+        for raw_style_id, raw_profile in raw.items():
+            style_id = str(raw_style_id)
+            info = catalog.styles.get(style_id)
+            if (
+                info is None
+                or info.style_type != "paragraph"
+                or not isinstance(raw_profile, dict)
+            ):
+                continue
+            profile: Dict[str, object] = {}
+            raw_indent = raw_profile.get("ind")
+            if isinstance(raw_indent, dict):
+                indentation: Dict[str, str] = {}
+                valid = True
+                for raw_attribute, raw_value in raw_indent.items():
+                    attribute = str(raw_attribute)
+                    if attribute not in HEADING_INDENT_ATTRIBUTES:
+                        valid = False
+                        break
+                    value = _safe_int(str(raw_value))
+                    if value is None:
+                        valid = False
+                        break
+                    indentation[attribute] = str(value)
+                if valid and indentation:
+                    profile["ind"] = _normalize_heading_indent_profile(
+                        indentation
+                    )
+
+            raw_spacing = raw_profile.get("spacing")
+            if isinstance(raw_spacing, dict):
+                spacing: Dict[str, str] = {}
+                valid = True
+                for raw_attribute, raw_value in raw_spacing.items():
+                    attribute = str(raw_attribute)
+                    if attribute in HEADING_SPACING_INTEGER_ATTRIBUTES:
+                        value = _safe_int(str(raw_value))
+                        if value is None:
+                            valid = False
+                            break
+                        spacing[attribute] = str(value)
+                    elif attribute in HEADING_SPACING_BOOLEAN_ATTRIBUTES:
+                        value = _canonical_on_off_attribute(str(raw_value))
+                        if value is None:
+                            valid = False
+                            break
+                        spacing[attribute] = value
+                    elif attribute == "lineRule":
+                        value = str(raw_value)
+                        if value not in LINE_SPACING_RULES:
+                            valid = False
+                            break
+                        spacing[attribute] = value
+                    else:
+                        valid = False
+                        break
+                if valid and spacing:
+                    profile["spacing"] = {
+                        attribute: spacing[attribute]
+                        for attribute in HEADING_SPACING_ATTRIBUTES
+                        if attribute in spacing
+                    }
+
+            raw_alignment = raw_profile.get("jc")
+            if isinstance(raw_alignment, str) and raw_alignment in PARAGRAPH_ALIGNMENT_VALUES:
+                profile["jc"] = raw_alignment
+            if profile:
+                result[style_id] = profile
+
+    legacy = heading_paragraph_indents_from_manifest(
+        legacy_indents, catalog
+    )
+    for style_id, indentation in legacy.items():
+        profile = result.setdefault(style_id, {})
+        profile.setdefault("ind", dict(indentation))
     return result
 
 
@@ -2835,6 +3190,42 @@ def _set_heading_paragraph_indent(
     _ordered_insert(paragraph_properties, indentation, PPR_CHILD_ORDER)
 
 
+def _set_heading_paragraph_properties(
+    paragraph_properties: etree._Element,
+    profile: Dict[str, object],
+) -> None:
+    raw_indent = profile.get("ind")
+    if isinstance(raw_indent, dict) and raw_indent:
+        _set_heading_paragraph_indent(
+            paragraph_properties,
+            {
+                str(attribute): str(value)
+                for attribute, value in raw_indent.items()
+            },
+        )
+
+    raw_spacing = profile.get("spacing")
+    if isinstance(raw_spacing, dict) and raw_spacing:
+        existing = paragraph_properties.find("w:spacing", namespaces=NS)
+        if existing is not None:
+            paragraph_properties.remove(existing)
+        spacing = etree.Element(qn(W_NS, "spacing"))
+        for attribute in HEADING_SPACING_ATTRIBUTES:
+            value = raw_spacing.get(attribute)
+            if value is not None:
+                spacing.set(qn(W_NS, attribute), str(value))
+        _ordered_insert(paragraph_properties, spacing, PPR_CHILD_ORDER)
+
+    alignment = profile.get("jc")
+    if isinstance(alignment, str) and alignment in PARAGRAPH_ALIGNMENT_VALUES:
+        existing = paragraph_properties.find("w:jc", namespaces=NS)
+        if existing is not None:
+            paragraph_properties.remove(existing)
+        justification = etree.Element(qn(W_NS, "jc"))
+        justification.set(qn(W_NS, "val"), alignment)
+        _ordered_insert(paragraph_properties, justification, PPR_CHILD_ORDER)
+
+
 def _has_nonzero_hanging(indentation: etree._Element) -> bool:
     return any(
         (_safe_int(indentation.get(qn(W_NS, attribute))) or 0) != 0
@@ -3251,6 +3642,9 @@ def clean_content_xml(
     heading_paragraph_indents: Optional[
         Dict[str, Dict[str, str]]
     ] = None,
+    heading_paragraph_properties: Optional[
+        Dict[str, Dict[str, object]]
+    ] = None,
     heading_level_shift: int = 0,
     table_no_indent_styles: Optional[Dict[str, str]] = None,
     body_numbering_map: Optional[Dict[str, str]] = None,
@@ -3262,6 +3656,13 @@ def clean_content_xml(
     preserve_target_table_formatting = not source_catalog.used_table_styles
     table_no_indent_styles = table_no_indent_styles or {}
     body_numbering_map = body_numbering_map or {}
+    effective_heading_properties: Dict[str, Dict[str, object]] = {
+        style_id: copy.deepcopy(profile)
+        for style_id, profile in (heading_paragraph_properties or {}).items()
+    }
+    for style_id, indentation in (heading_paragraph_indents or {}).items():
+        profile = effective_heading_properties.setdefault(style_id, {})
+        profile.setdefault("ind", copy.deepcopy(indentation))
 
     for paragraph in root.xpath("//w:p", namespaces=NS):
         stats.paragraphs_seen += 1
@@ -3380,15 +3781,6 @@ def clean_content_xml(
                         stats.heading_numbering_start = candidate.numbers[0]
                 _set_paragraph_numbering(ppr, rule)
                 stats.heading_numbers_applied += 1
-                heading_indent = (
-                    heading_paragraph_indents.get(mapped_style_id)
-                    if heading_paragraph_indents is not None
-                    and mapped_style_id is not None
-                    else None
-                )
-                if heading_indent:
-                    _set_heading_paragraph_indent(ppr, heading_indent)
-                    stats.heading_indents_applied += 1
             elif original_num_pr is not None:
                 # Ordinary lists remain target-owned content semantics.  A
                 # target heading's direct numbering is intentionally not
@@ -3411,6 +3803,22 @@ def clean_content_xml(
                 )
                 if restored_num_id not in {None, "0"}:
                     stats.body_list_paragraphs_preserved += 1
+
+            # Direct heading paragraph geometry belongs to the source format,
+            # regardless of whether the heading is numbered.  Apply it after
+            # list handling so a paragraph-level indent can intentionally
+            # override the numbering level without mutating numbering.xml.
+            heading_profile = (
+                effective_heading_properties.get(mapped_style_id)
+                if mapped_style_id is not None
+                and source_catalog.resolved_outline.get(mapped_style_id)
+                is not None
+                else None
+            )
+            if heading_profile:
+                _set_heading_paragraph_properties(ppr, heading_profile)
+                if isinstance(heading_profile.get("ind"), dict):
+                    stats.heading_indents_applied += 1
 
         if inside_table:
             effective_style_id = (
@@ -4722,7 +5130,7 @@ def transfer(
             source_catalog.used_table_styles,
             source_catalog.preferred_table_style,
         ) = collect_used_table_styles(source_entries, source_catalog)
-    heading_paragraph_indents = collect_heading_paragraph_indents(
+    heading_paragraph_properties = collect_heading_paragraph_properties(
         source_entries,
         source_catalog,
         set(source_heading_numbering) | set(source_heading_authority.values()),
@@ -4732,6 +5140,12 @@ def transfer(
         ),
         heading_authorities=source_heading_authority,
     )
+    heading_paragraph_indents = {
+        style_id: dict(indentation)
+        for style_id, profile in heading_paragraph_properties.items()
+        for indentation in [profile.get("ind")]
+        if isinstance(indentation, dict)
+    }
     source_layouts = (
         []
         if preserve_page_layout
@@ -4775,6 +5189,7 @@ def transfer(
             stats,
             heading_numbering=source_heading_numbering,
             heading_paragraph_indents=heading_paragraph_indents,
+            heading_paragraph_properties=heading_paragraph_properties,
             heading_level_shift=(
                 1
                 if demote_headings and name == "word/document.xml"

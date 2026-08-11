@@ -263,11 +263,13 @@ class StylePackInputLimitTests(unittest.TestCase):
         valid_path = library / "valid.wfstyle"
         shutil.copy2(self.normal_pack, valid_path)
         malformed = copy.deepcopy(manifest)
-        malformed["used_formats"] = 42
+        malformed["heading_paragraph_properties"] = {
+            "Heading1": {"spacing": {"lineRule": []}}
+        }
         invalid_path = library / "invalid.wfstyle"
         write_pack_with_manifest(invalid_path, malformed, entries)
 
-        with self.assertRaisesRegex(core.TransferError, "used_formats"):
+        with self.assertRaisesRegex(core.TransferError, "lineRule"):
             manager.load_style_pack(invalid_path)
         result = manager.list_library(library)
         self.assertEqual(len(result["packs"]), 1)

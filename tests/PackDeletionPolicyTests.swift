@@ -140,7 +140,137 @@ struct PackDeletionPolicyTests {
         try fileManager.moveItem(at: trashedURL, to: trashableURL)
         try require(fileManager.fileExists(atPath: trashableURL.path), "废纸篓文件应可恢复")
 
-        print("PackDeletionPolicyTests: 12 checks passed")
+        try runParagraphEditorTests()
+
+        print("PackDeletionPolicyTests: deletion and paragraph editor checks passed")
+    }
+
+    private static func runParagraphEditorTests() throws {
+        let legacy = try makeUsedFormat()
+        try require(legacy.leftIndentChars == nil, "旧格式 JSON 缺少字符缩进时应解码为 nil")
+        try require(legacy.leftIndentPt == nil, "旧格式 JSON 缺少磅缩进时应解码为 nil")
+        try require(legacy.alignment == nil, "旧格式 JSON 缺少对齐时应继续兼容")
+        let legacyDraft = StyleEditDraft(format: legacy)
+        try require(legacyDraft.payload == nil, "未编辑的旧格式不应产生修改请求")
+        try require(
+            legacyDraft.indentUnit == .characters,
+            "没有缩进元数据时应优先使用字符单位"
+        )
+
+        let modern = try makeUsedFormat(overrides: [
+            "alignment": "center",
+            "space_before_pt": 6.0,
+            "space_after_pt": 8.0,
+            "line_spacing": 1.25,
+            "line_rule": "auto",
+            "left_indent_chars": 1.0,
+            "right_indent_chars": 0.0,
+            "first_line_indent_chars": 2.0,
+            "hanging_indent_chars": 0.0
+        ])
+        try require(modern.lineSpacing == 1.25, "新格式 JSON 应保留两位小数行距")
+        try require(modern.firstLineIndentChars == 2, "字符缩进应使用真实字符数")
+
+        var edited = StyleEditDraft(format: modern)
+        edited.alignmentChoice = .justified
+        edited.spaceBeforeOverride = "12"
+        edited.spaceAfterOverride = "0"
+        edited.lineSpacingChoice = .auto
+        edited.lineSpacingOverride = "1,5"
+        edited.leftIndentOverride = "0"
+        edited.rightIndentOverride = "-1.25"
+        edited.specialIndentChoice = .firstLine
+        edited.specialIndentOverride = "3"
+        try require(edited.validationError == nil, "合法段落修改应通过 Swift 校验")
+        guard let payload = edited.payload else {
+            throw DeletionTestFailure.failed("合法段落修改应生成请求")
+        }
+        try require(payload.alignment == "both", "两端对齐应编码为 both")
+        try require(payload.spaceBeforePt == 12, "段前间距应进入请求")
+        try require(payload.spaceAfterPt == 0, "显式零段后间距不能被遗漏")
+        try require(payload.lineRule == "auto", "倍数行距必须携带 auto 规则")
+        try require(payload.lineSpacing == 1.5, "逗号小数应规范化为行距数值")
+        try require(payload.leftIndentChars == 0, "显式零左缩进不能被遗漏")
+        try require(payload.rightIndentChars == -1.25, "负字符缩进应在范围内保留")
+        try require(payload.firstLineIndentChars == 3, "首行缩进应使用字符数")
+        try require(payload.hangingIndentChars == 0, "首行缩进应显式清零悬挂缩进")
+        try require(payload.leftIndentPt == nil, "字符编辑不应同时发送磅缩进")
+
+        let encoded = try JSONEncoder().encode(payload)
+        guard let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+            throw DeletionTestFailure.failed("段落修改请求应编码为 JSON 对象")
+        }
+        try require(
+            (object["space_after_pt"] as? NSNumber)?.doubleValue == 0,
+            "JSON 编码必须保留显式零段后间距"
+        )
+        try require(
+            (object["hanging_indent_chars"] as? NSNumber)?.doubleValue == 0,
+            "JSON 编码必须保留互斥缩进的显式零"
+        )
+        try require(object["left_indent_pt"] == nil, "nil 字段应从修改 JSON 中省略")
+
+        var hanging = StyleEditDraft(format: modern)
+        hanging.specialIndentChoice = .hanging
+        hanging.specialIndentOverride = "1.5"
+        try require(hanging.validationError == nil, "合法悬挂缩进应通过校验")
+        try require(
+            hanging.payload?.firstLineIndentChars == 0 &&
+                hanging.payload?.hangingIndentChars == 1.5,
+            "悬挂缩进应显式清零首行缩进"
+        )
+
+        var noSpecialIndent = StyleEditDraft(format: modern)
+        noSpecialIndent.specialIndentChoice = .none
+        try require(
+            noSpecialIndent.payload?.firstLineIndentChars == 0 &&
+                noSpecialIndent.payload?.hangingIndentChars == 0,
+            "选择无特殊缩进应将首行和悬挂都清零"
+        )
+
+        var exactLine = StyleEditDraft(format: modern)
+        exactLine.lineSpacingChoice = .exact
+        exactLine.lineSpacingOverride = "20"
+        try require(exactLine.validationError == nil, "固定 20 pt 行距应通过校验")
+        try require(
+            exactLine.payload?.lineRule == "exact" && exactLine.payload?.lineSpacing == 20,
+            "行距规则和值必须成对发送"
+        )
+
+        var invalidLine = StyleEditDraft(format: modern)
+        invalidLine.lineSpacingChoice = .auto
+        invalidLine.lineSpacingOverride = "0.333"
+        try require(invalidLine.validationError != nil, "倍数行距应限制为 0.01 递增")
+
+        var invalidSpacing = StyleEditDraft(format: modern)
+        invalidSpacing.spaceBeforeOverride = "-1"
+        try require(invalidSpacing.validationError != nil, "段前间距不能为负数")
+
+        var invalidSpecial = StyleEditDraft(format: modern)
+        invalidSpecial.specialIndentChoice = .firstLine
+        invalidSpecial.specialIndentOverride = "1.001"
+        try require(invalidSpecial.validationError != nil, "字符缩进应限制为 0.01 递增")
+
+        let startAligned = try makeUsedFormat(overrides: ["alignment": "start"])
+        var normalizedAlignment = StyleEditDraft(format: startAligned)
+        normalizedAlignment.alignmentChoice = .left
+        try require(
+            normalizedAlignment.payload == nil,
+            "start 与 left 应视为相同对齐，避免生成无意义修改"
+        )
+
+        let pointsOnly = try makeUsedFormat(overrides: ["left_indent_pt": 24.0])
+        var pointsDraft = StyleEditDraft(format: pointsOnly)
+        try require(pointsDraft.indentUnit == .points, "仅有磅缩进时应默认使用磅单位")
+        pointsDraft.leftIndentOverride = "12.05"
+        try require(pointsDraft.validationError == nil, "磅缩进应允许 0.05 pt 递增")
+        try require(pointsDraft.payload?.leftIndentPt == 12.05, "磅缩进应进入 pt 字段")
+        try require(pointsDraft.payload?.leftIndentChars == nil, "磅缩进不应发送字符字段")
+
+        edited.reset()
+        try require(!edited.hasUserInput, "重置后不应保留段落输入或选择")
+        try require(edited.payload == nil, "重置后不应产生修改请求")
+        try require(edited.indentUnit == .characters, "重置后应恢复原格式首选缩进单位")
     }
 
     private static func makePack(id: String, path: String) throws -> PackManifest {
@@ -161,6 +291,22 @@ struct PackDeletionPolicyTests {
         ]
         let data = try JSONSerialization.data(withJSONObject: object)
         return try JSONDecoder().decode(PackManifest.self, from: data)
+    }
+
+    private static func makeUsedFormat(
+        overrides: [String: Any] = [:]
+    ) throws -> UsedFormat {
+        var object: [String: Any] = [
+            "style_id": "Heading1",
+            "name": "标题 1",
+            "type": "paragraph",
+            "usage_count": 1,
+            "sample": "标题示意",
+            "numbered": false
+        ]
+        for (key, value) in overrides { object[key] = value }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return try JSONDecoder().decode(UsedFormat.self, from: data)
     }
 
     private static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {

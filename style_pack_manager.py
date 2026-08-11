@@ -68,6 +68,15 @@ def _twips_to_cm(value: Optional[str]) -> Optional[float]:
         return None
 
 
+def _hundredths_to_units(value: Optional[str]) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return round(int(value) / 100.0, 2)
+    except (TypeError, ValueError):
+        return None
+
+
 def _safe_hex(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
@@ -160,7 +169,11 @@ def _merge_property_children(
         return
     for child in parent:
         key = etree.QName(child).localname
-        if key in {"rFonts", "spacing", "ind"} and key in destination:
+        if key == "ind":
+            destination[key] = core.merge_style_hierarchy_indentation(
+                destination.get(key), child
+            )
+        elif key in {"rFonts", "spacing"} and key in destination:
             merged = copy.deepcopy(destination[key])
             for attr, value in child.attrib.items():
                 merged.set(attr, value)
@@ -222,6 +235,7 @@ def _style_preview(
     numbering_rule: Optional[core.HeadingNumberingRule] = None,
     inferred: bool = False,
     inference_label: Optional[str] = None,
+    paragraph_override: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     info = catalog.styles.get(style_id)
     name = info.name if info is not None else style_id
@@ -252,6 +266,34 @@ def _style_preview(
         _merge_property_children(
             paragraph_properties, node.find("w:pPr", namespaces=core.NS)
         )
+
+    if paragraph_override:
+        override_properties = etree.Element(core.qn(core.W_NS, "pPr"))
+        raw_indent = paragraph_override.get("ind")
+        if isinstance(raw_indent, dict) and raw_indent:
+            indentation = etree.SubElement(
+                override_properties, core.qn(core.W_NS, "ind")
+            )
+            for attribute in core.HEADING_INDENT_ATTRIBUTES:
+                value = raw_indent.get(attribute)
+                if value is not None:
+                    indentation.set(core.qn(core.W_NS, attribute), str(value))
+        raw_spacing = paragraph_override.get("spacing")
+        if isinstance(raw_spacing, dict) and raw_spacing:
+            spacing_node = etree.SubElement(
+                override_properties, core.qn(core.W_NS, "spacing")
+            )
+            for attribute in core.HEADING_SPACING_ATTRIBUTES:
+                value = raw_spacing.get(attribute)
+                if value is not None:
+                    spacing_node.set(core.qn(core.W_NS, attribute), str(value))
+        alignment = paragraph_override.get("jc")
+        if isinstance(alignment, str):
+            alignment_node = etree.SubElement(
+                override_properties, core.qn(core.W_NS, "jc")
+            )
+            alignment_node.set(core.qn(core.W_NS, "val"), alignment)
+        _merge_property_children(paragraph_properties, override_properties)
 
     style_node = style_nodes.get(style_id)
     table_fill: Optional[str] = None
@@ -333,9 +375,10 @@ def _style_preview(
         raw_line = spacing.get(core.qn(core.W_NS, "line"))
         if raw_line:
             try:
+                line_rule = line_rule or "auto"
                 line_spacing = (
                     round(int(raw_line) / 240.0, 2)
-                    if line_rule in {None, "auto"}
+                    if line_rule == "auto"
                     else round(int(raw_line) / 20.0, 2)
                 )
             except ValueError:
@@ -347,6 +390,59 @@ def _style_preview(
         if alignment_node is not None
         else None
     )
+    indentation = paragraph_properties.get("ind")
+
+    def indent_attribute(*names: str) -> Optional[str]:
+        if indentation is None:
+            return None
+        for name in names:
+            value = indentation.get(core.qn(core.W_NS, name))
+            if value is not None:
+                return value
+        return None
+
+    def horizontal_indent(
+        point_names: Sequence[str], character_names: Sequence[str]
+    ) -> Tuple[Optional[float], Optional[float]]:
+        character_value = indent_attribute(*character_names)
+        if character_value is not None:
+            # OOXML character-unit attributes take precedence over their
+            # twip counterparts.  Hide the neutralising twip zero written by
+            # the editor so callers never round-trip both units at once.
+            return None, _hundredths_to_units(character_value)
+        return _twips_to_pt(indent_attribute(*point_names)), None
+
+    left_indent_pt, left_indent_chars = horizontal_indent(
+        ("start", "left"), ("startChars", "leftChars")
+    )
+    right_indent_pt, right_indent_chars = horizontal_indent(
+        ("end", "right"), ("endChars", "rightChars")
+    )
+
+    first_line_indent_pt, first_line_indent_chars = horizontal_indent(
+        ("firstLine",), ("firstLineChars",)
+    )
+    hanging_indent_pt, hanging_indent_chars = horizontal_indent(
+        ("hanging",), ("hangingChars",)
+    )
+    first_line_nonzero = any(
+        value not in {None, 0.0}
+        for value in (first_line_indent_pt, first_line_indent_chars)
+    )
+    hanging_nonzero = any(
+        value not in {None, 0.0}
+        for value in (hanging_indent_pt, hanging_indent_chars)
+    )
+    if hanging_nonzero:
+        first_line_indent_pt = None
+        first_line_indent_chars = None
+    elif first_line_nonzero:
+        hanging_indent_pt = None
+        hanging_indent_chars = None
+    elif first_line_indent_pt is not None or first_line_indent_chars is not None:
+        hanging_indent_pt = None
+        hanging_indent_chars = None
+
     outline_level = catalog.resolved_outline.get(style_id)
     numbering_example = _numbering_example(numbering_rule)
 
@@ -372,6 +468,14 @@ def _style_preview(
         "space_after_pt": after_pt,
         "line_spacing": line_spacing,
         "line_rule": line_rule,
+        "left_indent_pt": left_indent_pt,
+        "right_indent_pt": right_indent_pt,
+        "first_line_indent_pt": first_line_indent_pt,
+        "hanging_indent_pt": hanging_indent_pt,
+        "left_indent_chars": left_indent_chars,
+        "right_indent_chars": right_indent_chars,
+        "first_line_indent_chars": first_line_indent_chars,
+        "hanging_indent_chars": hanging_indent_chars,
         "outline_level": outline_level,
         "numbered": (
             numbering_rule is not None or "numPr" in paragraph_properties
@@ -598,7 +702,7 @@ def inspect_source(
     )
     styles_root = core.parse_xml(entries["word/styles.xml"], "styles.xml")
     theme = _theme_metadata(entries)
-    heading_paragraph_indents = core.collect_heading_paragraph_indents(
+    heading_paragraph_properties = core.collect_heading_paragraph_properties(
         entries,
         catalog,
         set(heading_numbering) | set(heading_authorities.values()),
@@ -606,6 +710,12 @@ def inspect_source(
         inherited_style_ids=inferred_heading_styles.values(),
         heading_authorities=heading_authorities,
     )
+    heading_paragraph_indents = {
+        style_id: dict(indentation)
+        for style_id, profile in heading_paragraph_properties.items()
+        for indentation in [profile.get("ind")]
+        if isinstance(indentation, dict)
+    }
 
     used_formats: List[Dict[str, object]] = []
     for style_type, counter in (
@@ -635,6 +745,9 @@ def inspect_source(
                     styles_root,
                     theme,
                     heading_numbering.get(style_id),
+                    paragraph_override=heading_paragraph_properties.get(
+                        style_id
+                    ),
                 )
             )
 
@@ -651,6 +764,7 @@ def inspect_source(
                 heading_numbering.get(style_id),
                 inferred=True,
                 inference_label="智能补全",
+                paragraph_override=heading_paragraph_properties.get(style_id),
             )
         )
 
@@ -742,6 +856,7 @@ def inspect_source(
             heading_numbering
         ),
         "heading_paragraph_indents": heading_paragraph_indents,
+        "heading_paragraph_properties": heading_paragraph_properties,
         "heading_numbering_conflicts": sorted(numbering_conflicts),
         "used_table_styles": sorted(table_usage.keys()),
         "preferred_table_style": (
@@ -1164,6 +1279,14 @@ def _validate_used_format_record(
         "space_before_pt",
         "space_after_pt",
         "line_spacing",
+        "left_indent_pt",
+        "right_indent_pt",
+        "first_line_indent_pt",
+        "hanging_indent_pt",
+        "left_indent_chars",
+        "right_indent_chars",
+        "first_line_indent_chars",
+        "hanging_indent_chars",
     ):
         _manifest_optional_number(raw.get(key), "%s.%s" % (field, key))
     for key in ("outline_level", "numbering_level"):
@@ -1208,6 +1331,102 @@ def _validate_count_object(
         raise core.TransferError("格式库字段 %s 必须是对象。" % field)
     for key in required_keys:
         _manifest_nonnegative_int(value.get(key), "%s.%s" % (field, key))
+
+
+def _validate_manifest_integer_text(value: object, field: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise core.TransferError(
+            "格式库字段 %s 必须是整数文本。" % field
+        )
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise core.TransferError(
+            "格式库字段 %s 必须是整数文本。" % field
+        ) from exc
+    if not -(2**31) <= parsed <= 2**31 - 1:
+        raise core.TransferError("格式库字段 %s 超出整数范围。" % field)
+
+
+def _validate_heading_indent_manifest(value: object, field: str) -> None:
+    if not isinstance(value, dict) or not value:
+        raise core.TransferError("格式库字段 %s 必须是非空对象。" % field)
+    for raw_attribute, raw_value in value.items():
+        attribute = _manifest_string(
+            raw_attribute, "%s 键" % field, maximum=64
+        )
+        if attribute not in core.HEADING_INDENT_ATTRIBUTES:
+            raise core.TransferError(
+                "格式库字段 %s.%s 不受支持。" % (field, attribute)
+            )
+        _validate_manifest_integer_text(
+            raw_value, "%s.%s" % (field, attribute)
+        )
+
+
+def _validate_heading_paragraph_properties_manifest(
+    value: object, field: str
+) -> None:
+    if not isinstance(value, dict):
+        raise core.TransferError("格式库字段 %s 必须是对象。" % field)
+    for raw_style_id, raw_profile in value.items():
+        style_id = _manifest_string(
+            raw_style_id, "%s 样式 ID" % field, maximum=255
+        )
+        item_field = "%s.%s" % (field, style_id)
+        if not isinstance(raw_profile, dict) or not raw_profile:
+            raise core.TransferError(
+                "格式库字段 %s 必须是非空对象。" % item_field
+            )
+        unknown = set(raw_profile).difference({"ind", "spacing", "jc"})
+        if unknown:
+            raise core.TransferError(
+                "格式库字段 %s 包含未知属性：%s。"
+                % (item_field, "、".join(sorted(str(key) for key in unknown)))
+            )
+        if "ind" in raw_profile:
+            _validate_heading_indent_manifest(
+                raw_profile["ind"], "%s.ind" % item_field
+            )
+        if "spacing" in raw_profile:
+            raw_spacing = raw_profile["spacing"]
+            spacing_field = "%s.spacing" % item_field
+            if not isinstance(raw_spacing, dict) or not raw_spacing:
+                raise core.TransferError(
+                    "格式库字段 %s 必须是非空对象。" % spacing_field
+                )
+            for raw_attribute, raw_value in raw_spacing.items():
+                attribute = _manifest_string(
+                    raw_attribute, "%s 键" % spacing_field, maximum=64
+                )
+                item = "%s.%s" % (spacing_field, attribute)
+                if attribute in core.HEADING_SPACING_INTEGER_ATTRIBUTES:
+                    _validate_manifest_integer_text(raw_value, item)
+                elif attribute in core.HEADING_SPACING_BOOLEAN_ATTRIBUTES:
+                    if core._canonical_on_off_attribute(str(raw_value)) is None:
+                        raise core.TransferError(
+                            "格式库字段 %s 必须是开关值。" % item
+                        )
+                elif attribute == "lineRule":
+                    line_rule = _manifest_string(
+                        raw_value, item, maximum=16
+                    )
+                    if line_rule not in core.LINE_SPACING_RULES:
+                        raise core.TransferError(
+                            "格式库字段 %s 的行距规则无效。" % item
+                        )
+                else:
+                    raise core.TransferError(
+                        "格式库字段 %s 不受支持。" % item
+                    )
+        if "jc" in raw_profile:
+            alignment = _manifest_string(
+                raw_profile["jc"], "%s.jc" % item_field, maximum=64
+            )
+            if alignment not in core.PARAGRAPH_ALIGNMENT_VALUES:
+                raise core.TransferError(
+                    "格式库字段 %s.jc 的对齐方式无效。" % item_field
+                )
 
 
 def _validate_style_pack_manifest(manifest: Dict[str, object]) -> None:
@@ -1318,6 +1537,23 @@ def _validate_style_pack_manifest(manifest: Dict[str, object]) -> None:
     for key in ("heading_numbering", "heading_paragraph_indents", "derivation"):
         if key in manifest and not isinstance(manifest[key], dict):
             raise core.TransferError("格式库字段 %s 必须是对象。" % key)
+    raw_heading_indents = manifest.get("heading_paragraph_indents")
+    if isinstance(raw_heading_indents, dict):
+        for raw_style_id, raw_indent in raw_heading_indents.items():
+            style_id = _manifest_string(
+                raw_style_id,
+                "heading_paragraph_indents 样式 ID",
+                maximum=255,
+            )
+            _validate_heading_indent_manifest(
+                raw_indent,
+                "heading_paragraph_indents.%s" % style_id,
+            )
+    if "heading_paragraph_properties" in manifest:
+        _validate_heading_paragraph_properties_manifest(
+            manifest["heading_paragraph_properties"],
+            "heading_paragraph_properties",
+        )
     authorities = manifest.get("heading_authorities")
     if authorities is not None:
         if not isinstance(authorities, dict):
@@ -1454,13 +1690,33 @@ _RUN_STYLE_EDIT_FIELDS = {
     "bold",
     "color_hex",
 }
+_PARAGRAPH_STYLE_EDIT_FIELDS = {
+    "alignment",
+    "space_before_pt",
+    "space_after_pt",
+    "line_spacing",
+    "line_rule",
+    "left_indent_pt",
+    "right_indent_pt",
+    "first_line_indent_pt",
+    "hanging_indent_pt",
+    "left_indent_chars",
+    "right_indent_chars",
+    "first_line_indent_chars",
+    "hanging_indent_chars",
+}
 _TABLE_STYLE_EDIT_FIELDS = {"table_fill_hex", "table_accent_hex"}
-_STYLE_EDIT_FIELDS = _RUN_STYLE_EDIT_FIELDS | _TABLE_STYLE_EDIT_FIELDS
+_STYLE_EDIT_FIELDS = (
+    _RUN_STYLE_EDIT_FIELDS
+    | _PARAGRAPH_STYLE_EDIT_FIELDS
+    | _TABLE_STYLE_EDIT_FIELDS
+)
 _DERIVED_MANIFEST_COPY_FIELDS = {
     "heading_authorities",
     "heading_completion_warnings",
     "heading_numbering",
     "heading_paragraph_indents",
+    "heading_paragraph_properties",
     "heading_numbering_conflicts",
     "manual_formatting",
     "document_summary",
@@ -1529,6 +1785,35 @@ def _validated_edit_color(value: object, label: str) -> str:
     ):
         raise core.TransferError("%s必须是 6 位十六进制颜色，例如 #165D52。" % label)
     return value.strip().lstrip("#").upper()
+
+
+def _validated_edit_number(
+    value: object,
+    label: str,
+    minimum: float,
+    maximum: float,
+    step: float,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise core.TransferError(
+            "%s必须是 %.2f–%.2f 之间的数字。" % (label, minimum, maximum)
+        )
+    try:
+        parsed = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise core.TransferError(
+            "%s必须是 %.2f–%.2f 之间的数字。" % (label, minimum, maximum)
+        ) from exc
+    if not math.isfinite(parsed) or not minimum <= parsed <= maximum:
+        raise core.TransferError(
+            "%s必须在 %.2f–%.2f 之间。" % (label, minimum, maximum)
+        )
+    steps = parsed / step
+    if not math.isclose(steps, round(steps), abs_tol=1e-7):
+        raise core.TransferError(
+            "%s必须以 %.2f 为步进。" % (label, step)
+        )
+    return round(parsed, 8)
 
 
 def _normalize_style_edits(payload: object) -> List[Dict[str, object]]:
@@ -1615,6 +1900,118 @@ def _normalize_style_edits(payload: object) -> List[Dict[str, object]]:
             edit["table_accent_hex"] = _validated_edit_color(
                 raw_edit["table_accent_hex"], "表格强调色"
             )
+
+        if "alignment" in raw_edit:
+            alignment = _validated_short_text(
+                raw_edit["alignment"], "段落对齐方式", maximum=32
+            )
+            if alignment not in core.PARAGRAPH_ALIGNMENT_VALUES:
+                raise core.TransferError("段落对齐方式不受支持：%s。" % alignment)
+            edit["alignment"] = alignment
+        for field, label in (
+            ("space_before_pt", "段前间距"),
+            ("space_after_pt", "段后间距"),
+        ):
+            if field in raw_edit:
+                edit[field] = _validated_edit_number(
+                    raw_edit[field], label, 0.0, 1584.0, 0.05
+                )
+
+        has_line_spacing = "line_spacing" in raw_edit
+        has_line_rule = "line_rule" in raw_edit
+        if has_line_spacing != has_line_rule:
+            raise core.TransferError("行距数值与行距规则必须同时提供。")
+        if has_line_spacing:
+            line_rule = _validated_short_text(
+                raw_edit["line_rule"], "行距规则", maximum=16
+            )
+            if line_rule not in core.LINE_SPACING_RULES:
+                raise core.TransferError(
+                    "行距规则只支持 auto、exact 或 atLeast。"
+                )
+            if line_rule == "auto":
+                line_spacing = _validated_edit_number(
+                    raw_edit["line_spacing"],
+                    "多倍行距",
+                    0.5,
+                    10.0,
+                    0.01,
+                )
+            else:
+                line_spacing = _validated_edit_number(
+                    raw_edit["line_spacing"],
+                    "固定行距",
+                    1.0,
+                    1584.0,
+                    0.05,
+                )
+            edit["line_rule"] = line_rule
+            edit["line_spacing"] = line_spacing
+
+        point_indent_fields = (
+            ("left_indent_pt", "左缩进", -1584.0, 1584.0),
+            ("right_indent_pt", "右缩进", -1584.0, 1584.0),
+            ("first_line_indent_pt", "首行缩进", 0.0, 1584.0),
+            ("hanging_indent_pt", "悬挂缩进", 0.0, 1584.0),
+        )
+        character_indent_fields = (
+            ("left_indent_chars", "左缩进字符数", -100.0, 100.0),
+            ("right_indent_chars", "右缩进字符数", -100.0, 100.0),
+            ("first_line_indent_chars", "首行缩进字符数", 0.0, 100.0),
+            ("hanging_indent_chars", "悬挂缩进字符数", 0.0, 100.0),
+        )
+        for field, label, minimum, maximum in point_indent_fields:
+            if field in raw_edit:
+                edit[field] = _validated_edit_number(
+                    raw_edit[field], label, minimum, maximum, 0.05
+                )
+        for field, label, minimum, maximum in character_indent_fields:
+            if field in raw_edit:
+                edit[field] = _validated_edit_number(
+                    raw_edit[field], label, minimum, maximum, 0.01
+                )
+
+        for point_field, character_field, label in (
+            ("left_indent_pt", "left_indent_chars", "左缩进"),
+            ("right_indent_pt", "right_indent_chars", "右缩进"),
+            (
+                "first_line_indent_pt",
+                "first_line_indent_chars",
+                "首行缩进",
+            ),
+            (
+                "hanging_indent_pt",
+                "hanging_indent_chars",
+                "悬挂缩进",
+            ),
+        ):
+            if point_field in raw_edit and character_field in raw_edit:
+                raise core.TransferError(
+                    "%s不能同时使用磅值和字符单位。" % label
+                )
+        first_line_fields = (
+            "first_line_indent_pt",
+            "first_line_indent_chars",
+        )
+        hanging_fields = (
+            "hanging_indent_pt",
+            "hanging_indent_chars",
+        )
+        first_line_value = next(
+            (float(edit[field]) for field in first_line_fields if field in edit),
+            None,
+        )
+        hanging_value = next(
+            (float(edit[field]) for field in hanging_fields if field in edit),
+            None,
+        )
+        if (
+            first_line_value is not None
+            and hanging_value is not None
+            and not math.isclose(first_line_value, 0.0, abs_tol=1e-9)
+            and not math.isclose(hanging_value, 0.0, abs_tol=1e-9)
+        ):
+            raise core.TransferError("首行缩进与悬挂缩进不能同时为非零值。")
         if len(edit) == 1:
             raise core.TransferError("样式 %s 没有提供任何可修改字段。" % style_id)
         normalized_edits.append(edit)
@@ -1696,6 +2093,179 @@ def _apply_run_edits(
             node.set(core.qn(core.W_NS, "val"), half_points)
 
 
+def _pt_to_twips(value: object) -> str:
+    return str(int(round(float(value) * 20.0)))
+
+
+def _characters_to_hundredths(value: object) -> str:
+    return str(int(round(float(value) * 100.0)))
+
+
+def _apply_paragraph_edits(
+    paragraph_properties: etree._Element,
+    edit: Dict[str, object],
+) -> None:
+    if "alignment" in edit:
+        alignment = _ensure_ordered_child(
+            paragraph_properties, "jc", core.PPR_CHILD_ORDER
+        )
+        alignment.set(core.qn(core.W_NS, "val"), str(edit["alignment"]))
+
+    spacing_fields = {
+        "space_before_pt",
+        "space_after_pt",
+        "line_spacing",
+        "line_rule",
+    }.intersection(edit)
+    if spacing_fields:
+        spacing = _ensure_ordered_child(
+            paragraph_properties, "spacing", core.PPR_CHILD_ORDER
+        )
+        if "space_before_pt" in edit:
+            spacing.set(
+                core.qn(core.W_NS, "before"),
+                _pt_to_twips(edit["space_before_pt"]),
+            )
+            # These attributes otherwise inherit independently and can make a
+            # newly-selected point value ineffective.
+            spacing.set(core.qn(core.W_NS, "beforeLines"), "0")
+            spacing.set(core.qn(core.W_NS, "beforeAutospacing"), "0")
+        if "space_after_pt" in edit:
+            spacing.set(
+                core.qn(core.W_NS, "after"),
+                _pt_to_twips(edit["space_after_pt"]),
+            )
+            spacing.set(core.qn(core.W_NS, "afterLines"), "0")
+            spacing.set(core.qn(core.W_NS, "afterAutospacing"), "0")
+        if "line_spacing" in edit and "line_rule" in edit:
+            line_rule = str(edit["line_rule"])
+            raw_line = (
+                int(round(float(edit["line_spacing"]) * 240.0))
+                if line_rule == "auto"
+                else int(round(float(edit["line_spacing"]) * 20.0))
+            )
+            spacing.set(core.qn(core.W_NS, "line"), str(raw_line))
+            spacing.set(core.qn(core.W_NS, "lineRule"), line_rule)
+
+    indent_fields = {
+        "left_indent_pt",
+        "right_indent_pt",
+        "first_line_indent_pt",
+        "hanging_indent_pt",
+        "left_indent_chars",
+        "right_indent_chars",
+        "first_line_indent_chars",
+        "hanging_indent_chars",
+    }.intersection(edit)
+    if not indent_fields:
+        return
+    indentation = _ensure_ordered_child(
+        paragraph_properties, "ind", core.PPR_CHILD_ORDER
+    )
+
+    if "left_indent_pt" in edit:
+        value = _pt_to_twips(edit["left_indent_pt"])
+        for attribute in ("left", "start"):
+            indentation.set(core.qn(core.W_NS, attribute), value)
+        for attribute in ("leftChars", "startChars"):
+            indentation.set(core.qn(core.W_NS, attribute), "0")
+    elif "left_indent_chars" in edit:
+        value = _characters_to_hundredths(edit["left_indent_chars"])
+        for attribute in ("leftChars", "startChars"):
+            indentation.set(core.qn(core.W_NS, attribute), value)
+        for attribute in ("left", "start"):
+            indentation.set(core.qn(core.W_NS, attribute), "0")
+
+    if "right_indent_pt" in edit:
+        value = _pt_to_twips(edit["right_indent_pt"])
+        for attribute in ("right", "end"):
+            indentation.set(core.qn(core.W_NS, attribute), value)
+        for attribute in ("rightChars", "endChars"):
+            indentation.set(core.qn(core.W_NS, attribute), "0")
+    elif "right_indent_chars" in edit:
+        value = _characters_to_hundredths(edit["right_indent_chars"])
+        for attribute in ("rightChars", "endChars"):
+            indentation.set(core.qn(core.W_NS, attribute), value)
+        for attribute in ("right", "end"):
+            indentation.set(core.qn(core.W_NS, attribute), "0")
+
+    first_line_field = next(
+        (
+            field
+            for field in ("first_line_indent_pt", "first_line_indent_chars")
+            if field in edit
+        ),
+        None,
+    )
+    hanging_field = next(
+        (
+            field
+            for field in ("hanging_indent_pt", "hanging_indent_chars")
+            if field in edit
+        ),
+        None,
+    )
+    use_hanging = (
+        hanging_field is not None
+        and not math.isclose(float(edit[hanging_field]), 0.0, abs_tol=1e-9)
+        and (
+            first_line_field is None
+            or math.isclose(
+                float(edit[first_line_field]), 0.0, abs_tol=1e-9
+            )
+        )
+    )
+
+    if use_hanging and hanging_field == "hanging_indent_pt":
+        indentation.set(
+            core.qn(core.W_NS, "hanging"),
+            _pt_to_twips(edit[hanging_field]),
+        )
+        indentation.set(core.qn(core.W_NS, "hangingChars"), "0")
+        for attribute in ("firstLine", "firstLineChars"):
+            indentation.attrib.pop(core.qn(core.W_NS, attribute), None)
+    elif use_hanging and hanging_field == "hanging_indent_chars":
+        indentation.set(
+            core.qn(core.W_NS, "hangingChars"),
+            _characters_to_hundredths(edit[hanging_field]),
+        )
+        indentation.set(core.qn(core.W_NS, "hanging"), "0")
+        for attribute in ("firstLine", "firstLineChars"):
+            indentation.attrib.pop(core.qn(core.W_NS, attribute), None)
+    elif "first_line_indent_pt" in edit:
+        indentation.set(
+            core.qn(core.W_NS, "firstLine"),
+            _pt_to_twips(edit["first_line_indent_pt"]),
+        )
+        indentation.set(core.qn(core.W_NS, "firstLineChars"), "0")
+        for attribute in ("hanging", "hangingChars"):
+            indentation.attrib.pop(core.qn(core.W_NS, attribute), None)
+    elif "first_line_indent_chars" in edit:
+        indentation.set(
+            core.qn(core.W_NS, "firstLineChars"),
+            _characters_to_hundredths(edit["first_line_indent_chars"]),
+        )
+        indentation.set(core.qn(core.W_NS, "firstLine"), "0")
+        for attribute in ("hanging", "hangingChars"):
+            indentation.attrib.pop(core.qn(core.W_NS, attribute), None)
+    elif "hanging_indent_pt" in edit:
+        indentation.set(
+            core.qn(core.W_NS, "hanging"),
+            _pt_to_twips(edit["hanging_indent_pt"]),
+        )
+        indentation.set(core.qn(core.W_NS, "hangingChars"), "0")
+        for attribute in ("firstLine", "firstLineChars"):
+            indentation.attrib.pop(core.qn(core.W_NS, attribute), None)
+    elif "hanging_indent_chars" in edit:
+        indentation.set(
+            core.qn(core.W_NS, "hangingChars"),
+            _characters_to_hundredths(edit["hanging_indent_chars"]),
+        )
+        indentation.set(core.qn(core.W_NS, "hanging"), "0")
+        for attribute in ("firstLine", "firstLineChars"):
+            indentation.attrib.pop(core.qn(core.W_NS, attribute), None)
+
+
 def _set_solid_shading(node: etree._Element, color_hex: str) -> None:
     node.set(core.qn(core.W_NS, "val"), "clear")
     node.set(core.qn(core.W_NS, "color"), "auto")
@@ -1717,6 +2287,7 @@ def _apply_style_node_edit(
     edit: Dict[str, object],
 ) -> None:
     run_fields = _RUN_STYLE_EDIT_FIELDS.intersection(edit)
+    paragraph_fields = _PARAGRAPH_STYLE_EDIT_FIELDS.intersection(edit)
     table_fields = _TABLE_STYLE_EDIT_FIELDS.intersection(edit)
     if run_fields:
         if style_type not in {"paragraph", "character"}:
@@ -1728,6 +2299,16 @@ def _apply_style_node_edit(
             style_node, "rPr", core.STYLE_CHILD_ORDER
         )
         _apply_run_edits(run_properties, edit)
+    if paragraph_fields:
+        if style_type != "paragraph":
+            raise core.TransferError(
+                "样式 %s 不是段落样式，不能修改段落属性。"
+                % edit["style_id"]
+            )
+        paragraph_properties = _ensure_ordered_child(
+            style_node, "pPr", core.STYLE_CHILD_ORDER
+        )
+        _apply_paragraph_edits(paragraph_properties, edit)
     if table_fields:
         if style_type != "table":
             raise core.TransferError(
@@ -1771,6 +2352,50 @@ def _apply_style_node_edit(
                 cell_properties, "shd", _TABLE_CELL_PROPERTY_ORDER
             )
             _set_solid_shading(shading, str(edit["table_accent_hex"]))
+
+
+def _synchronize_heading_paragraph_properties(
+    manifest: Dict[str, object],
+    catalog: core.StyleCatalog,
+    edits: Sequence[Dict[str, object]],
+) -> None:
+    """Keep direct heading overrides aligned with paragraph-style edits."""
+    properties = core.heading_paragraph_properties_from_manifest(
+        manifest.get("heading_paragraph_properties"),
+        catalog,
+        legacy_indents=manifest.get("heading_paragraph_indents"),
+    )
+    for edit in edits:
+        if not _PARAGRAPH_STYLE_EDIT_FIELDS.intersection(edit):
+            continue
+        style_id = str(edit["style_id"])
+        info = catalog.styles.get(style_id)
+        if (
+            info is None
+            or info.style_type != "paragraph"
+            or catalog.resolved_outline.get(style_id) is None
+        ):
+            continue
+        paragraph_properties = etree.Element(core.qn(core.W_NS, "pPr"))
+        existing = properties.get(style_id)
+        if existing:
+            core._set_heading_paragraph_properties(
+                paragraph_properties, existing
+            )
+        _apply_paragraph_edits(paragraph_properties, edit)
+        updated = core._heading_paragraph_property_profile(
+            paragraph_properties
+        )
+        if updated:
+            properties[style_id] = updated
+
+    manifest["heading_paragraph_properties"] = properties
+    manifest["heading_paragraph_indents"] = {
+        style_id: dict(indentation)
+        for style_id, profile in properties.items()
+        for indentation in [profile.get("ind")]
+        if isinstance(indentation, dict)
+    }
 
 
 def _append_missing_font_records(
@@ -1888,6 +2513,13 @@ def _refresh_used_format_previews(
     numbering = core.heading_numbering_from_manifest(
         manifest.get("heading_numbering"), runtime_entries, catalog
     )
+    heading_paragraph_properties = (
+        core.heading_paragraph_properties_from_manifest(
+            manifest.get("heading_paragraph_properties"),
+            catalog,
+            legacy_indents=manifest.get("heading_paragraph_indents"),
+        )
+    )
     previews: List[Dict[str, object]] = []
     raw_formats = manifest.get("used_formats")
     if not isinstance(raw_formats, list):
@@ -1936,6 +2568,7 @@ def _refresh_used_format_previews(
                 if inferred
                 else None
             ),
+            paragraph_override=heading_paragraph_properties.get(style_id),
         )
         if configured:
             preview["configured"] = True
@@ -2215,6 +2848,9 @@ def derive_style_pack(
 
     _apply_heading_numbering_edits(entries, effective_manifest, edits)
     _append_missing_font_records(entries, edits)
+    _synchronize_heading_paragraph_properties(
+        effective_manifest, catalog, edits
+    )
     # Final privacy and relationship pass after all XML mutations.
     entries = _pack_format_entries(entries)
     previews, refreshed_catalog = _refresh_used_format_previews(
@@ -2538,15 +3174,33 @@ def apply_style_pack(
     core.align_heading_style_numbering(
         source_entries, used_heading_style_ids, heading_numbering
     )
-    heading_paragraph_indents = core.heading_paragraph_indents_from_manifest(
-        manifest.get("heading_paragraph_indents"), source_catalog
+    heading_paragraph_properties = (
+        core.heading_paragraph_properties_from_manifest(
+            manifest.get("heading_paragraph_properties"),
+            source_catalog,
+            legacy_indents=manifest.get("heading_paragraph_indents"),
+        )
     )
     for level, style_id in sorted(runtime_inferred_headings.items()):
         parent_style_id = heading_authorities.get(level - 1)
-        if parent_style_id in heading_paragraph_indents:
-            heading_paragraph_indents[style_id] = dict(
-                heading_paragraph_indents[parent_style_id]
-            )
+        parent_profile = heading_paragraph_properties.get(
+            parent_style_id or ""
+        )
+        parent_indent = (
+            parent_profile.get("ind")
+            if isinstance(parent_profile, dict)
+            else None
+        )
+        if isinstance(parent_indent, dict):
+            heading_paragraph_properties[style_id] = {
+                "ind": copy.deepcopy(parent_indent)
+            }
+    heading_paragraph_indents = {
+        style_id: dict(indentation)
+        for style_id, profile in heading_paragraph_properties.items()
+        for indentation in [profile.get("ind")]
+        if isinstance(indentation, dict)
+    }
     source_catalog.used_table_styles = used_table_styles
     preferred_table = manifest.get("preferred_table_style")
     source_catalog.preferred_table_style = (
@@ -2619,10 +3273,14 @@ def apply_style_pack(
                 continue
             stats.warnings.append(warning)
     stats.warnings.extend(runtime_completion_warnings)
-    if "heading_paragraph_indents" not in manifest and heading_numbering:
+    if (
+        "heading_paragraph_properties" not in manifest
+        and "heading_paragraph_indents" not in manifest
+        and heading_numbering
+    ):
         stats.warnings.append(
-            "此格式库由旧版本创建，未保存标题段落实际缩进；"
-            "如需精确复制标题 Left、首行和悬挂，请用当前版本重新导入一次格式源。"
+            "此格式库由旧版本创建，未保存标题段落的实际缩进、"
+            "间距和对齐；如需精确复制，请用当前版本重新导入一次格式源。"
         )
     for name in sorted(list(target_entries)):
         if not core.is_content_part(name):
@@ -2636,6 +3294,7 @@ def apply_style_pack(
             stats,
             heading_numbering=heading_numbering,
             heading_paragraph_indents=heading_paragraph_indents,
+            heading_paragraph_properties=heading_paragraph_properties,
             heading_level_shift=(
                 1
                 if demote_headings and name == "word/document.xml"

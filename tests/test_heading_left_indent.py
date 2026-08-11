@@ -60,17 +60,18 @@ def write_zip(path: Path, entries: Dict[str, bytes]) -> None:
             archive.writestr(name, data)
 
 
-def remove_manifest_field_from_pack(
-    source_pack: Path, legacy_pack: Path, field_name: str
+def remove_manifest_fields_from_pack(
+    source_pack: Path, legacy_pack: Path, field_names: Tuple[str, ...]
 ) -> Dict[str, object]:
     """Clone a valid pack while simulating a manifest from an older release."""
     with zipfile.ZipFile(source_pack, "r") as archive:
         members = {name: archive.read(name) for name in archive.namelist()}
 
     manifest = json.loads(members["manifest.json"].decode("utf-8"))
-    if field_name not in manifest:
-        raise AssertionError("new pack did not contain field: %s" % field_name)
-    manifest.pop(field_name)
+    for field_name in field_names:
+        if field_name not in manifest:
+            raise AssertionError("new pack did not contain field: %s" % field_name)
+        manifest.pop(field_name)
     members["manifest.json"] = json.dumps(
         manifest,
         ensure_ascii=False,
@@ -534,14 +535,19 @@ class HeadingLeftIndentTests(unittest.TestCase):
     ) -> None:
         legacy_pack = self.working_dir / "legacy-heading-left-zero.wfstyle"
         legacy_output = self.working_dir / "legacy-output.docx"
-        legacy_manifest = remove_manifest_field_from_pack(
+        legacy_manifest = remove_manifest_fields_from_pack(
             self.pack,
             legacy_pack,
-            "heading_paragraph_indents",
+            (
+                "heading_paragraph_properties",
+                "heading_paragraph_indents",
+            ),
         )
+        self.assertNotIn("heading_paragraph_properties", legacy_manifest)
         self.assertNotIn("heading_paragraph_indents", legacy_manifest)
 
         loaded_manifest, _entries = manager.load_style_pack(legacy_pack)
+        self.assertNotIn("heading_paragraph_properties", loaded_manifest)
         self.assertNotIn("heading_paragraph_indents", loaded_manifest)
         _manifest, stats = manager.apply_style_pack(
             legacy_pack,

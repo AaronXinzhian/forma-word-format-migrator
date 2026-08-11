@@ -25,6 +25,14 @@ struct UsedFormat: Codable, Hashable, Identifiable {
     let spaceAfterPt: Double?
     let lineSpacing: Double?
     let lineRule: String?
+    let leftIndentPt: Double?
+    let rightIndentPt: Double?
+    let firstLineIndentPt: Double?
+    let hangingIndentPt: Double?
+    let leftIndentChars: Double?
+    let rightIndentChars: Double?
+    let firstLineIndentChars: Double?
+    let hangingIndentChars: Double?
     let outlineLevel: Int?
     let numbered: Bool
     let numberingLevel: Int?
@@ -54,6 +62,14 @@ struct UsedFormat: Codable, Hashable, Identifiable {
         case spaceAfterPt = "space_after_pt"
         case lineSpacing = "line_spacing"
         case lineRule = "line_rule"
+        case leftIndentPt = "left_indent_pt"
+        case rightIndentPt = "right_indent_pt"
+        case firstLineIndentPt = "first_line_indent_pt"
+        case hangingIndentPt = "hanging_indent_pt"
+        case leftIndentChars = "left_indent_chars"
+        case rightIndentChars = "right_indent_chars"
+        case firstLineIndentChars = "first_line_indent_chars"
+        case hangingIndentChars = "hanging_indent_chars"
         case outlineLevel = "outline_level"
         case numbered
         case numberingLevel = "numbering_level"
@@ -202,13 +218,26 @@ private struct StyleEditRequest: Encodable {
     let styles: [StyleEditPayload]
 }
 
-private struct StyleEditPayload: Encodable {
+struct StyleEditPayload: Encodable {
     let styleID: String
     let fontEastAsia: String?
     let fontLatin: String?
     let sizePt: Double?
     let bold: Bool?
     let colorHex: String?
+    let alignment: String?
+    let spaceBeforePt: Double?
+    let spaceAfterPt: Double?
+    let lineSpacing: Double?
+    let lineRule: String?
+    let leftIndentPt: Double?
+    let rightIndentPt: Double?
+    let firstLineIndentPt: Double?
+    let hangingIndentPt: Double?
+    let leftIndentChars: Double?
+    let rightIndentChars: Double?
+    let firstLineIndentChars: Double?
+    let hangingIndentChars: Double?
     let tableFillHex: String?
     let tableAccentHex: String?
 
@@ -219,6 +248,19 @@ private struct StyleEditPayload: Encodable {
         case sizePt = "size_pt"
         case bold
         case colorHex = "color_hex"
+        case alignment
+        case spaceBeforePt = "space_before_pt"
+        case spaceAfterPt = "space_after_pt"
+        case lineSpacing = "line_spacing"
+        case lineRule = "line_rule"
+        case leftIndentPt = "left_indent_pt"
+        case rightIndentPt = "right_indent_pt"
+        case firstLineIndentPt = "first_line_indent_pt"
+        case hangingIndentPt = "hanging_indent_pt"
+        case leftIndentChars = "left_indent_chars"
+        case rightIndentChars = "right_indent_chars"
+        case firstLineIndentChars = "first_line_indent_chars"
+        case hangingIndentChars = "hanging_indent_chars"
         case tableFillHex = "table_fill_hex"
         case tableAccentHex = "table_accent_hex"
     }
@@ -230,6 +272,19 @@ private struct StyleEditPayload: Encodable {
             sizePt != nil,
             bold != nil,
             colorHex != nil,
+            alignment != nil,
+            spaceBeforePt != nil,
+            spaceAfterPt != nil,
+            lineSpacing != nil,
+            lineRule != nil,
+            leftIndentPt != nil,
+            rightIndentPt != nil,
+            firstLineIndentPt != nil,
+            hangingIndentPt != nil,
+            leftIndentChars != nil,
+            rightIndentChars != nil,
+            firstLineIndentChars != nil,
+            hangingIndentChars != nil,
             tableFillHex != nil,
             tableAccentHex != nil
         ].filter { $0 }.count
@@ -1685,7 +1740,139 @@ private enum FormatFilter: String, CaseIterable, Identifiable {
     }
 }
 
-private enum BoldEditChoice: String, CaseIterable, Identifiable {
+enum ParagraphAlignmentEditChoice: String, CaseIterable, Identifiable {
+    case unchanged
+    case left
+    case center
+    case right
+    case justified
+    case distributed
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .unchanged: return "不修改"
+        case .left: return "左对齐"
+        case .center: return "居中"
+        case .right: return "右对齐"
+        case .justified: return "两端对齐"
+        case .distributed: return "分散对齐"
+        }
+    }
+
+    var encodedValue: String? {
+        switch self {
+        case .unchanged: return nil
+        case .left: return "left"
+        case .center: return "center"
+        case .right: return "right"
+        case .justified: return "both"
+        case .distributed: return "distribute"
+        }
+    }
+
+    func effectiveValue(original: String?) -> String? {
+        encodedValue ?? Self.canonical(original)
+    }
+
+    func changedValue(original: String?) -> String? {
+        guard let encodedValue else { return nil }
+        return Self.canonical(original) == encodedValue ? nil : encodedValue
+    }
+
+    static func canonical(_ value: String?) -> String? {
+        guard let value else { return nil }
+        switch value {
+        case "start": return "left"
+        case "end": return "right"
+        default: return value
+        }
+    }
+}
+
+enum LineSpacingEditChoice: String, CaseIterable, Identifiable {
+    case unchanged
+    case auto
+    case exact
+    case atLeast
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .unchanged: return "不修改"
+        case .auto: return "倍数"
+        case .exact: return "固定值"
+        case .atLeast: return "最小值"
+        }
+    }
+
+    var encodedValue: String? {
+        self == .unchanged ? nil : rawValue
+    }
+
+    static func canonical(_ rule: String?, spacing: Double?) -> String? {
+        if rule == nil, spacing != nil { return "auto" }
+        return rule
+    }
+}
+
+enum ParagraphIndentUnit: String, CaseIterable, Identifiable {
+    case characters
+    case points
+
+    var id: String { rawValue }
+    var label: String { self == .characters ? "字符" : "pt" }
+    var fullLabel: String { self == .characters ? "字符" : "磅" }
+}
+
+enum SpecialIndentEditChoice: String, CaseIterable, Identifiable {
+    case unchanged
+    case none
+    case firstLine
+    case hanging
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .unchanged: return "不修改"
+        case .none: return "无"
+        case .firstLine: return "首行缩进"
+        case .hanging: return "悬挂缩进"
+        }
+    }
+
+    var requiresValue: Bool {
+        self == .firstLine || self == .hanging
+    }
+}
+
+struct ParagraphIndentMeasurement: Equatable {
+    let value: Double
+    let unit: ParagraphIndentUnit
+
+    var displayText: String {
+        "\(paragraphNumber(value)) \(unit.label)"
+    }
+
+    func previewPoints(fontSize: Double) -> Double {
+        unit == .characters ? value * fontSize : value
+    }
+}
+
+private struct ParagraphLineEdit {
+    let spacing: Double
+    let rule: String
+}
+
+private struct ParagraphSpecialIndentEdit {
+    let firstLine: Double
+    let hanging: Double
+}
+
+enum BoldEditChoice: String, CaseIterable, Identifiable {
     case inherit
     case bold
     case regular
@@ -1717,15 +1904,30 @@ private enum BoldEditChoice: String, CaseIterable, Identifiable {
     }
 }
 
-private struct StyleEditDraft: Identifiable {
+struct StyleEditDraft: Identifiable {
     let format: UsedFormat
     var fontEastAsiaOverride = ""
     var fontLatinOverride = ""
     var sizeOverride = ""
     var boldChoice: BoldEditChoice = .inherit
     var colorOverride = ""
+    var alignmentChoice: ParagraphAlignmentEditChoice = .unchanged
+    var spaceBeforeOverride = ""
+    var spaceAfterOverride = ""
+    var lineSpacingChoice: LineSpacingEditChoice = .unchanged
+    var lineSpacingOverride = ""
+    var indentUnit: ParagraphIndentUnit
+    var leftIndentOverride = ""
+    var rightIndentOverride = ""
+    var specialIndentChoice: SpecialIndentEditChoice = .unchanged
+    var specialIndentOverride = ""
     var tableFillOverride = ""
     var tableAccentOverride = ""
+
+    init(format: UsedFormat) {
+        self.format = format
+        indentUnit = Self.preferredIndentUnit(for: format)
+    }
 
     var id: String { format.id }
     var isTable: Bool { format.type == "table" }
@@ -1735,6 +1937,7 @@ private struct StyleEditDraft: Identifiable {
     var supportsTextFormatting: Bool {
         format.type == "paragraph" || format.type == "character"
     }
+    var supportsParagraphFormatting: Bool { format.type == "paragraph" }
 
     var effectiveFontEastAsia: String? {
         normalizedText(fontEastAsiaOverride) ?? format.fontEastAsia
@@ -1754,6 +1957,92 @@ private struct StyleEditDraft: Identifiable {
 
     var effectiveColorHex: String? {
         normalizedColor(colorOverride) ?? normalizedColor(format.colorHex ?? "")
+    }
+
+    var effectiveAlignment: String? {
+        alignmentChoice.effectiveValue(original: format.alignment)
+    }
+
+    var effectiveSpaceBeforePt: Double? {
+        parsedNumber(spaceBeforeOverride) ?? format.spaceBeforePt
+    }
+
+    var effectiveSpaceAfterPt: Double? {
+        parsedNumber(spaceAfterOverride) ?? format.spaceAfterPt
+    }
+
+    var effectiveLineRule: String? {
+        lineSpacingChoice.encodedValue ?? LineSpacingEditChoice.canonical(
+            format.lineRule,
+            spacing: format.lineSpacing
+        )
+    }
+
+    var effectiveLineSpacing: Double? {
+        parsedNumber(lineSpacingOverride) ?? format.lineSpacing
+    }
+
+    var effectiveLeftIndent: ParagraphIndentMeasurement? {
+        if let value = parsedNumber(leftIndentOverride) {
+            return ParagraphIndentMeasurement(value: value, unit: indentUnit)
+        }
+        return Self.preferredMeasurement(
+            chars: format.leftIndentChars,
+            points: format.leftIndentPt
+        )
+    }
+
+    var effectiveRightIndent: ParagraphIndentMeasurement? {
+        if let value = parsedNumber(rightIndentOverride) {
+            return ParagraphIndentMeasurement(value: value, unit: indentUnit)
+        }
+        return Self.preferredMeasurement(
+            chars: format.rightIndentChars,
+            points: format.rightIndentPt
+        )
+    }
+
+    var originalSpecialIndentChoice: SpecialIndentEditChoice {
+        if Self.hasNonzero(format.firstLineIndentChars) ||
+            Self.hasNonzero(format.firstLineIndentPt) {
+            return .firstLine
+        }
+        if Self.hasNonzero(format.hangingIndentChars) ||
+            Self.hasNonzero(format.hangingIndentPt) {
+            return .hanging
+        }
+        return .none
+    }
+
+    var effectiveSpecialIndentChoice: SpecialIndentEditChoice {
+        specialIndentChoice == .unchanged
+            ? originalSpecialIndentChoice
+            : specialIndentChoice
+    }
+
+    var effectiveSpecialIndent: ParagraphIndentMeasurement? {
+        switch specialIndentChoice {
+        case .firstLine, .hanging:
+            guard let value = parsedNumber(specialIndentOverride) else { return nil }
+            return ParagraphIndentMeasurement(value: value, unit: indentUnit)
+        case .none:
+            return nil
+        case .unchanged:
+            switch originalSpecialIndentChoice {
+            case .firstLine:
+                return Self.preferredMeasurement(
+                    chars: format.firstLineIndentChars,
+                    points: format.firstLineIndentPt
+                )
+            case .hanging:
+                return Self.preferredMeasurement(
+                    chars: format.hangingIndentChars,
+                    points: format.hangingIndentPt
+                )
+            case .none, .unchanged:
+                return nil
+            }
+        }
     }
 
     var effectiveTableFillHex: String? {
@@ -1794,6 +2083,83 @@ private struct StyleEditDraft: Identifiable {
                 return "文字颜色请输入 6 位十六进制色值，例如 165D52。"
             }
         }
+        if supportsParagraphFormatting {
+            if let error = validateNumber(
+                spaceBeforeOverride,
+                label: "段前间距",
+                range: 0...1584,
+                scale: 20,
+                unit: "pt"
+            ) { return error }
+            if let error = validateNumber(
+                spaceAfterOverride,
+                label: "段后间距",
+                range: 0...1584,
+                scale: 20,
+                unit: "pt"
+            ) { return error }
+
+            if lineSpacingChoice != .unchanged,
+               lineSpacingOverride.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return "选择新的行距类型后，请填写行距值。"
+            }
+            if !lineSpacingOverride.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let rule = lineSpacingChoice.encodedValue ??
+                    LineSpacingEditChoice.canonical(
+                        format.lineRule,
+                        spacing: format.lineSpacing
+                    ) ?? "auto"
+                if rule == "auto" {
+                    if let error = validateNumber(
+                        lineSpacingOverride,
+                        label: "倍数行距",
+                        range: 0.5...10,
+                        scale: 100,
+                        unit: "倍"
+                    ) { return error }
+                } else if let error = validateNumber(
+                    lineSpacingOverride,
+                    label: rule == "exact" ? "固定行距" : "最小行距",
+                    range: 1...1584,
+                    scale: 20,
+                    unit: "pt"
+                ) { return error }
+            }
+
+            let sideRange: ClosedRange<Double> = indentUnit == .characters
+                ? -100...100
+                : -1584...1584
+            let positiveRange: ClosedRange<Double> = indentUnit == .characters
+                ? 0...100
+                : 0...1584
+            let scale = indentUnit == .characters ? 100.0 : 20.0
+            if let error = validateNumber(
+                leftIndentOverride,
+                label: "左缩进",
+                range: sideRange,
+                scale: scale,
+                unit: indentUnit.label
+            ) { return error }
+            if let error = validateNumber(
+                rightIndentOverride,
+                label: "右缩进",
+                range: sideRange,
+                scale: scale,
+                unit: indentUnit.label
+            ) { return error }
+            if specialIndentChoice.requiresValue {
+                if specialIndentOverride.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return "请选择首行或悬挂缩进后填写缩进值。"
+                }
+                if let error = validateNumber(
+                    specialIndentOverride,
+                    label: specialIndentChoice == .firstLine ? "首行缩进" : "悬挂缩进",
+                    range: positiveRange,
+                    scale: scale,
+                    unit: indentUnit.label
+                ) { return error }
+            }
+        }
         if isTable {
             if !tableFillOverride.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                normalizedColor(tableFillOverride) == nil {
@@ -1831,6 +2197,20 @@ private struct StyleEditDraft: Identifiable {
             override: tableAccentOverride,
             original: format.tableAccentHex
         )
+        let lineEdit = changedLineEdit
+        let leftIndent = changedNumber(
+            override: leftIndentOverride,
+            original: indentUnit == .characters
+                ? format.leftIndentChars
+                : format.leftIndentPt
+        )
+        let rightIndent = changedNumber(
+            override: rightIndentOverride,
+            original: indentUnit == .characters
+                ? format.rightIndentChars
+                : format.rightIndentPt
+        )
+        let specialIndent = changedSpecialIndent
         let payload = StyleEditPayload(
             styleID: format.styleID,
             fontEastAsia: supportsTextFormatting ? eastAsia : nil,
@@ -1840,6 +2220,47 @@ private struct StyleEditDraft: Identifiable {
                 ? boldChoice.changedValue(original: format.bold)
                 : nil,
             colorHex: supportsTextFormatting ? textColor : nil,
+            alignment: supportsParagraphFormatting
+                ? alignmentChoice.changedValue(original: format.alignment)
+                : nil,
+            spaceBeforePt: supportsParagraphFormatting
+                ? changedNumber(
+                    override: spaceBeforeOverride,
+                    original: format.spaceBeforePt
+                )
+                : nil,
+            spaceAfterPt: supportsParagraphFormatting
+                ? changedNumber(
+                    override: spaceAfterOverride,
+                    original: format.spaceAfterPt
+                )
+                : nil,
+            lineSpacing: supportsParagraphFormatting ? lineEdit?.spacing : nil,
+            lineRule: supportsParagraphFormatting ? lineEdit?.rule : nil,
+            leftIndentPt: supportsParagraphFormatting && indentUnit == .points
+                ? leftIndent
+                : nil,
+            rightIndentPt: supportsParagraphFormatting && indentUnit == .points
+                ? rightIndent
+                : nil,
+            firstLineIndentPt: supportsParagraphFormatting && indentUnit == .points
+                ? specialIndent?.firstLine
+                : nil,
+            hangingIndentPt: supportsParagraphFormatting && indentUnit == .points
+                ? specialIndent?.hanging
+                : nil,
+            leftIndentChars: supportsParagraphFormatting && indentUnit == .characters
+                ? leftIndent
+                : nil,
+            rightIndentChars: supportsParagraphFormatting && indentUnit == .characters
+                ? rightIndent
+                : nil,
+            firstLineIndentChars: supportsParagraphFormatting && indentUnit == .characters
+                ? specialIndent?.firstLine
+                : nil,
+            hangingIndentChars: supportsParagraphFormatting && indentUnit == .characters
+                ? specialIndent?.hanging
+                : nil,
             tableFillHex: isTable ? tableFill : nil,
             tableAccentHex: isTable ? tableAccent : nil
         )
@@ -1854,11 +2275,21 @@ private struct StyleEditDraft: Identifiable {
             fontLatinOverride,
             sizeOverride,
             colorOverride,
+            spaceBeforeOverride,
+            spaceAfterOverride,
+            lineSpacingOverride,
+            leftIndentOverride,
+            rightIndentOverride,
             tableFillOverride,
             tableAccentOverride
         ].contains(where: {
             !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }) || boldChoice != .inherit
+        }) || boldChoice != .inherit ||
+            alignmentChoice != .unchanged ||
+            lineSpacingChoice != .unchanged ||
+            specialIndentChoice != .unchanged ||
+            (specialIndentChoice.requiresValue &&
+                !specialIndentOverride.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
     mutating func reset() {
@@ -1867,6 +2298,16 @@ private struct StyleEditDraft: Identifiable {
         sizeOverride = ""
         boldChoice = .inherit
         colorOverride = ""
+        alignmentChoice = .unchanged
+        spaceBeforeOverride = ""
+        spaceAfterOverride = ""
+        lineSpacingChoice = .unchanged
+        lineSpacingOverride = ""
+        indentUnit = Self.preferredIndentUnit(for: format)
+        leftIndentOverride = ""
+        rightIndentOverride = ""
+        specialIndentChoice = .unchanged
+        specialIndentOverride = ""
         tableFillOverride = ""
         tableAccentOverride = ""
     }
@@ -1884,6 +2325,67 @@ private struct StyleEditDraft: Identifiable {
         return value
     }
 
+    private func changedNumber(override: String, original: Double?) -> Double? {
+        guard let value = parsedNumber(override) else { return nil }
+        if let original, abs(original - value) < 0.0001 { return nil }
+        return value
+    }
+
+    private var changedLineEdit: ParagraphLineEdit? {
+        let hasValue = !lineSpacingOverride
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hasValue || lineSpacingChoice != .unchanged,
+              let value = parsedNumber(lineSpacingOverride) else {
+            return nil
+        }
+        let rule = lineSpacingChoice.encodedValue ??
+            LineSpacingEditChoice.canonical(
+                format.lineRule,
+                spacing: format.lineSpacing
+            ) ?? "auto"
+        let originalRule = LineSpacingEditChoice.canonical(
+            format.lineRule,
+            spacing: format.lineSpacing
+        )
+        if rule == originalRule,
+           let originalSpacing = format.lineSpacing,
+           abs(originalSpacing - value) < 0.0001 {
+            return nil
+        }
+        return ParagraphLineEdit(spacing: value, rule: rule)
+    }
+
+    private var changedSpecialIndent: ParagraphSpecialIndentEdit? {
+        switch specialIndentChoice {
+        case .unchanged:
+            return nil
+        case .none:
+            guard originalSpecialIndentChoice != .none else { return nil }
+            return ParagraphSpecialIndentEdit(firstLine: 0, hanging: 0)
+        case .firstLine, .hanging:
+            guard let value = parsedNumber(specialIndentOverride) else { return nil }
+            let originalValue: Double?
+            if indentUnit == .characters {
+                originalValue = specialIndentChoice == .firstLine
+                    ? format.firstLineIndentChars
+                    : format.hangingIndentChars
+            } else {
+                originalValue = specialIndentChoice == .firstLine
+                    ? format.firstLineIndentPt
+                    : format.hangingIndentPt
+            }
+            if originalSpecialIndentChoice == specialIndentChoice,
+               let originalValue,
+               abs(originalValue - value) < 0.0001 {
+                return nil
+            }
+            return ParagraphSpecialIndentEdit(
+                firstLine: specialIndentChoice == .firstLine ? value : 0,
+                hanging: specialIndentChoice == .hanging ? value : 0
+            )
+        }
+    }
+
     private func changedColor(override: String, original: String?) -> String? {
         guard let value = normalizedColor(override) else { return nil }
         return value == normalizedColor(original ?? "") ? nil : value
@@ -1895,14 +2397,78 @@ private struct StyleEditDraft: Identifiable {
     }
 
     private func parsedSize(_ value: String) -> Double? {
+        parsedNumber(value)
+    }
+
+    private func parsedNumber(_ value: String) -> Double? {
         let normalized = value
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: ",", with: ".")
-        return normalized.isEmpty ? nil : Double(normalized)
+        guard !normalized.isEmpty,
+              let parsed = Double(normalized),
+              parsed.isFinite else { return nil }
+        return parsed
     }
 
     private func normalizedColor(_ value: String) -> String? {
         normalizedHexColor(value)
+    }
+
+    private func validateNumber(
+        _ raw: String,
+        label: String,
+        range: ClosedRange<Double>,
+        scale: Double,
+        unit: String
+    ) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let value = parsedNumber(raw), range.contains(value) else {
+            return "\(label)需要在 \(paragraphNumber(range.lowerBound))–\(paragraphNumber(range.upperBound)) \(unit) 之间。"
+        }
+        guard abs(value * scale - (value * scale).rounded()) < 0.0001 else {
+            let increment = 1 / scale
+            return "\(label)请以 \(paragraphNumber(increment)) \(unit) 递增。"
+        }
+        return nil
+    }
+
+    private static func preferredIndentUnit(for format: UsedFormat) -> ParagraphIndentUnit {
+        if [
+            format.leftIndentChars,
+            format.rightIndentChars,
+            format.firstLineIndentChars,
+            format.hangingIndentChars
+        ].contains(where: { $0 != nil }) {
+            return .characters
+        }
+        if [
+            format.leftIndentPt,
+            format.rightIndentPt,
+            format.firstLineIndentPt,
+            format.hangingIndentPt
+        ].contains(where: { $0 != nil }) {
+            return .points
+        }
+        return .characters
+    }
+
+    private static func preferredMeasurement(
+        chars: Double?,
+        points: Double?
+    ) -> ParagraphIndentMeasurement? {
+        if let chars {
+            return ParagraphIndentMeasurement(value: chars, unit: .characters)
+        }
+        if let points {
+            return ParagraphIndentMeasurement(value: points, unit: .points)
+        }
+        return nil
+    }
+
+    private static func hasNonzero(_ value: Double?) -> Bool {
+        guard let value else { return false }
+        return abs(value) >= 0.0001
     }
 }
 
@@ -2341,6 +2907,147 @@ private struct StyleEditControls: View {
                             fallbackHex: "19332F"
                         )
                     }
+
+                    if draft.supportsParagraphFormatting {
+                        StyleEditorSection(title: "段落排列", icon: "text.alignleft") {
+                            HStack(spacing: 8) {
+                                StyleEditorControlLabel("对齐方式")
+                                Picker("对齐方式", selection: $draft.alignmentChoice) {
+                                    ForEach(ParagraphAlignmentEditChoice.allCases) { choice in
+                                        Text(choice.label).tag(choice)
+                                    }
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.menu)
+                                .frame(maxWidth: 190)
+                                .accessibilityLabel("段落对齐方式")
+                                .accessibilityValue(
+                                    draft.alignmentChoice == .unchanged
+                                        ? "不修改，原方案\(paragraphAlignmentText(draft.format.alignment))"
+                                        : draft.alignmentChoice.label
+                                )
+                                Spacer(minLength: 0)
+                            }
+                            EditorOriginalValue(
+                                "原方案：\(paragraphAlignmentText(draft.format.alignment))"
+                            )
+                        }
+
+                        StyleEditorSection(title: "间距与行距", icon: "line.3.horizontal") {
+                            ParagraphNumberField(
+                                label: "段前",
+                                originalText: originalPointText(draft.format.spaceBeforePt),
+                                value: $draft.spaceBeforeOverride,
+                                unit: "pt",
+                                accessibilityHint: "允许 0 到 1584 磅，留空保留原方案"
+                            )
+                            ParagraphNumberField(
+                                label: "段后",
+                                originalText: originalPointText(draft.format.spaceAfterPt),
+                                value: $draft.spaceAfterOverride,
+                                unit: "pt",
+                                accessibilityHint: "允许 0 到 1584 磅，留空保留原方案"
+                            )
+                            HStack(spacing: 8) {
+                                StyleEditorControlLabel("行距类型")
+                                Picker("行距类型", selection: $draft.lineSpacingChoice) {
+                                    ForEach(LineSpacingEditChoice.allCases) { choice in
+                                        Text(choice.label).tag(choice)
+                                    }
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.menu)
+                                .frame(maxWidth: 190)
+                                .accessibilityLabel("行距类型")
+                                .accessibilityValue(
+                                    draft.lineSpacingChoice == .unchanged
+                                        ? "不修改，原方案\(paragraphLineSpacingText(value: draft.format.lineSpacing, rule: draft.format.lineRule))"
+                                        : draft.lineSpacingChoice.label
+                                )
+                                Spacer(minLength: 0)
+                            }
+                            ParagraphNumberField(
+                                label: "行距数值",
+                                originalText: originalLineSpacingValue,
+                                value: $draft.lineSpacingOverride,
+                                unit: lineSpacingUnit,
+                                accessibilityHint: lineSpacingHint
+                            )
+                            EditorOriginalValue(
+                                "原方案：\(paragraphLineSpacingText(value: draft.format.lineSpacing, rule: draft.format.lineRule))"
+                            )
+                        }
+
+                        StyleEditorSection(title: "缩进", icon: "arrow.left.and.right") {
+                            HStack(spacing: 8) {
+                                StyleEditorControlLabel("输入单位")
+                                Picker("缩进输入单位", selection: $draft.indentUnit) {
+                                    ForEach(ParagraphIndentUnit.allCases) { unit in
+                                        Text(unit.fullLabel).tag(unit)
+                                    }
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.segmented)
+                                .frame(maxWidth: 190)
+                                .accessibilityLabel("缩进输入单位")
+                                .accessibilityValue(draft.indentUnit.fullLabel)
+                                Spacer(minLength: 0)
+                            }
+                            ParagraphNumberField(
+                                label: "左缩进",
+                                originalText: originalIndentText(
+                                    chars: draft.format.leftIndentChars,
+                                    points: draft.format.leftIndentPt
+                                ),
+                                value: $draft.leftIndentOverride,
+                                unit: draft.indentUnit.label,
+                                accessibilityHint: indentSideHint
+                            )
+                            ParagraphNumberField(
+                                label: "右缩进",
+                                originalText: originalIndentText(
+                                    chars: draft.format.rightIndentChars,
+                                    points: draft.format.rightIndentPt
+                                ),
+                                value: $draft.rightIndentOverride,
+                                unit: draft.indentUnit.label,
+                                accessibilityHint: indentSideHint
+                            )
+                            HStack(spacing: 8) {
+                                StyleEditorControlLabel("特殊格式")
+                                Picker("特殊缩进格式", selection: $draft.specialIndentChoice) {
+                                    ForEach(SpecialIndentEditChoice.allCases) { choice in
+                                        Text(choice.label).tag(choice)
+                                    }
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.menu)
+                                .frame(maxWidth: 190)
+                                .accessibilityLabel("特殊缩进格式")
+                                .accessibilityValue(
+                                    draft.specialIndentChoice == .unchanged
+                                        ? "不修改，原方案\(paragraphSpecialIndentText(draft.format))"
+                                        : draft.specialIndentChoice.label
+                                )
+                                Spacer(minLength: 0)
+                            }
+                            ParagraphNumberField(
+                                label: "缩进值",
+                                originalText: originalSpecialIndentValue,
+                                value: $draft.specialIndentOverride,
+                                unit: draft.indentUnit.label,
+                                accessibilityHint: specialIndentHint,
+                                isEnabled: draft.specialIndentChoice.requiresValue
+                            )
+                            EditorOriginalValue(
+                                "原方案：\(paragraphIndentSidesText(draft.format))；\(paragraphSpecialIndentText(draft.format))"
+                            )
+                            Text("字符单位可精确设置“首行缩进 2 字符”；切换单位不会换算已经输入的数值。")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Palette.mutedInk)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 } else if draft.isTable {
                     StyleEditorSection(title: "表格颜色", icon: "tablecells") {
                         EditorColorField(
@@ -2380,6 +3087,64 @@ private struct StyleEditControls: View {
         }
         .background(Palette.paper.opacity(0.72))
     }
+
+    private var originalLineSpacingValue: String {
+        draft.format.lineSpacing.map(paragraphNumber) ?? "继承"
+    }
+
+    private var lineSpacingUnit: String {
+        let rule = draft.lineSpacingChoice.encodedValue ??
+            LineSpacingEditChoice.canonical(
+                draft.format.lineRule,
+                spacing: draft.format.lineSpacing
+            ) ?? "auto"
+        return rule == "auto" ? "倍" : "pt"
+    }
+
+    private var lineSpacingHint: String {
+        lineSpacingUnit == "倍"
+            ? "允许 0.5 到 10 倍，并以 0.01 递增；留空保留原方案"
+            : "允许 1 到 1584 磅，并以 0.05 磅递增；留空保留原方案"
+    }
+
+    private var indentSideHint: String {
+        draft.indentUnit == .characters
+            ? "允许负 100 到 100 字符，并以 0.01 字符递增；留空保留原方案"
+            : "允许负 1584 到 1584 磅，并以 0.05 磅递增；留空保留原方案"
+    }
+
+    private var specialIndentHint: String {
+        draft.indentUnit == .characters
+            ? "允许 0 到 100 字符，并以 0.01 字符递增"
+            : "允许 0 到 1584 磅，并以 0.05 磅递增"
+    }
+
+    private var originalSpecialIndentValue: String {
+        switch draft.originalSpecialIndentChoice {
+        case .firstLine:
+            return originalIndentText(
+                chars: draft.format.firstLineIndentChars,
+                points: draft.format.firstLineIndentPt
+            )
+        case .hanging:
+            return originalIndentText(
+                chars: draft.format.hangingIndentChars,
+                points: draft.format.hangingIndentPt
+            )
+        case .none, .unchanged:
+            return "无"
+        }
+    }
+
+    private func originalPointText(_ value: Double?) -> String {
+        value.map { "\(paragraphNumber($0)) pt" } ?? "继承"
+    }
+
+    private func originalIndentText(chars: Double?, points: Double?) -> String {
+        if let chars { return "\(paragraphNumber(chars)) 字符" }
+        if let points { return "\(paragraphNumber(points)) pt" }
+        return "继承"
+    }
 }
 
 private struct StyleEditorSection<Content: View>: View {
@@ -2416,6 +3181,67 @@ private struct StyleEditorControlLabel: View {
             .font(.system(size: 11.5, weight: .semibold))
             .foregroundStyle(Palette.mutedInk)
             .frame(width: 86, alignment: .leading)
+    }
+}
+
+private struct ParagraphNumberField: View {
+    let label: String
+    let originalText: String
+    @Binding var value: String
+    let unit: String
+    let accessibilityHint: String
+    var isEnabled = true
+
+    var body: some View {
+        HStack(spacing: 8) {
+            StyleEditorControlLabel(label)
+            TextField(
+                isEnabled ? "原方案 \(originalText)" : "无需填写",
+                text: $value
+            )
+            .textFieldStyle(.roundedBorder)
+            .frame(maxWidth: 170)
+            .disabled(!isEnabled)
+            .accessibilityLabel("\(label)，单位\(unit)")
+            .accessibilityValue(
+                value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? (isEnabled ? "不修改，原方案 \(originalText)" : "无需填写")
+                    : "\(value) \(unit)"
+            )
+            .accessibilityHint(accessibilityHint)
+            Text(unit)
+                .font(.system(size: 11))
+                .foregroundStyle(Palette.mutedInk)
+                .frame(minWidth: 24, alignment: .leading)
+                .accessibilityHidden(true)
+            if isEnabled && !value.isEmpty {
+                Button {
+                    value = ""
+                } label: {
+                    Image(systemName: "arrow.uturn.backward.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Palette.mutedInk)
+                .help("恢复原方案")
+                .accessibilityLabel("恢复\(label)原值")
+            }
+        }
+    }
+}
+
+private struct EditorOriginalValue: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10))
+            .foregroundStyle(Palette.mutedInk)
+            .padding(.leading, 98)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -2555,6 +3381,40 @@ private struct StyleEditLivePreview: View {
                             label: "文字颜色",
                             value: draft.effectiveColorHex.map { "#\($0)" } ?? "自动"
                         )
+                        if draft.supportsParagraphFormatting {
+                            PreviewPropertyRow(
+                                label: "对齐",
+                                value: paragraphAlignmentText(draft.effectiveAlignment)
+                            )
+                            PreviewPropertyRow(
+                                label: "段前 / 段后",
+                                value: paragraphSpacingText(
+                                    before: draft.effectiveSpaceBeforePt,
+                                    after: draft.effectiveSpaceAfterPt
+                                )
+                            )
+                            PreviewPropertyRow(
+                                label: "行距",
+                                value: paragraphLineSpacingText(
+                                    value: draft.effectiveLineSpacing,
+                                    rule: draft.effectiveLineRule
+                                )
+                            )
+                            PreviewPropertyRow(
+                                label: "左 / 右缩进",
+                                value: paragraphIndentSidesText(
+                                    left: draft.effectiveLeftIndent,
+                                    right: draft.effectiveRightIndent
+                                )
+                            )
+                            PreviewPropertyRow(
+                                label: "特殊缩进",
+                                value: paragraphSpecialIndentText(
+                                    choice: draft.effectiveSpecialIndentChoice,
+                                    measurement: draft.effectiveSpecialIndent
+                                )
+                            )
+                        }
                     } else if draft.isTable {
                         PreviewPropertyRow(
                             label: "表格底色",
@@ -2587,13 +3447,19 @@ private struct StyleEditLivePreview: View {
         let size = min(max(draft.effectiveSize ?? 16, 11), 34)
         let fontName = draft.effectiveFontEastAsia ?? draft.effectiveFontLatin
         return VStack(alignment: .leading, spacing: 11) {
-            Text(draft.format.sample.isEmpty ? "标题与正文格式示意 Aa 123" : draft.format.sample)
-                .font(fontName.map { .custom($0, size: size) } ?? .system(size: size))
-                .fontWeight(draft.effectiveBold == true ? .bold : .regular)
-                .italic(draft.format.italic == true)
-                .foregroundStyle(draft.effectiveColorHex.map(Color.init(hex:)) ?? Palette.ink)
-                .lineLimit(3)
-                .frame(maxWidth: .infinity, minHeight: 94, alignment: .leading)
+            if draft.supportsParagraphFormatting {
+                ParagraphStyleTextPreview(draft: draft)
+                    .frame(maxWidth: .infinity, minHeight: 138, maxHeight: 168)
+                    .accessibilityHidden(true)
+            } else {
+                Text(draft.format.sample.isEmpty ? "标题与正文格式示意 Aa 123" : draft.format.sample)
+                    .font(fontName.map { .custom($0, size: size) } ?? .system(size: size))
+                    .fontWeight(draft.effectiveBold == true ? .bold : .regular)
+                    .italic(draft.format.italic == true)
+                    .foregroundStyle(draft.effectiveColorHex.map(Color.init(hex:)) ?? Palette.ink)
+                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, minHeight: 94, alignment: .leading)
+            }
             Rectangle()
                 .fill(Palette.line)
                 .frame(height: 1)
@@ -2641,6 +3507,120 @@ private struct StyleEditLivePreview: View {
     }
 }
 
+private struct ParagraphStyleTextPreview: NSViewRepresentable {
+    let draft: StyleEditDraft
+
+    func makeNSView(context: Context) -> NSTextView {
+        let textView = NSTextView(frame: .zero)
+        textView.isEditable = false
+        textView.isSelectable = false
+        textView.drawsBackground = false
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return textView
+    }
+
+    func updateNSView(_ textView: NSTextView, context: Context) {
+        let size = min(max(draft.effectiveSize ?? 16, 11), 34)
+        let fontName = draft.effectiveFontEastAsia ?? draft.effectiveFontLatin
+        var font = fontName.flatMap { NSFont(name: $0, size: CGFloat(size)) }
+            ?? NSFont.systemFont(ofSize: CGFloat(size))
+        if draft.effectiveBold == true {
+            font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+        }
+        if draft.format.italic == true {
+            font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+        }
+
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = nsTextAlignment(draft.effectiveAlignment)
+        paragraphStyle.paragraphSpacingBefore = CGFloat(
+            min(max(draft.effectiveSpaceBeforePt ?? 0, 0), 42)
+        )
+        paragraphStyle.paragraphSpacing = CGFloat(
+            min(max(draft.effectiveSpaceAfterPt ?? 0, 0), 42)
+        )
+
+        if let lineSpacing = draft.effectiveLineSpacing {
+            switch draft.effectiveLineRule ?? "auto" {
+            case "exact":
+                let height = CGFloat(min(max(lineSpacing, 1), 80))
+                paragraphStyle.minimumLineHeight = height
+                paragraphStyle.maximumLineHeight = height
+            case "atLeast":
+                paragraphStyle.minimumLineHeight = CGFloat(min(max(lineSpacing, 1), 80))
+            default:
+                paragraphStyle.lineHeightMultiple = CGFloat(min(max(lineSpacing, 0.5), 3))
+            }
+        }
+
+        let left = previewIndentPoints(draft.effectiveLeftIndent, fontSize: size)
+        let right = max(0, previewIndentPoints(draft.effectiveRightIndent, fontSize: size))
+        let special = max(0, previewIndentPoints(draft.effectiveSpecialIndent, fontSize: size))
+        paragraphStyle.headIndent = CGFloat(left)
+        paragraphStyle.firstLineHeadIndent = CGFloat(left)
+        paragraphStyle.tailIndent = CGFloat(-right)
+        switch draft.effectiveSpecialIndentChoice {
+        case .firstLine:
+            paragraphStyle.firstLineHeadIndent = CGFloat(left + special)
+        case .hanging:
+            paragraphStyle.headIndent = CGFloat(left + special)
+        case .none, .unchanged:
+            break
+        }
+
+        let primary = draft.format.sample.isEmpty
+            ? "标题与正文格式示意 Aa 123"
+            : draft.format.sample
+        let previewText = primary +
+            "　这是一段用于观察自动换行、首行或悬挂缩进的示意文字。\n" +
+            "下一段用于比较段前、段后与行距设置。"
+        let color = draft.effectiveColorHex.flatMap(nsColorFromHex) ?? NSColor.labelColor
+        textView.textStorage?.setAttributedString(
+            NSAttributedString(
+                string: previewText,
+                attributes: [
+                    .font: font,
+                    .foregroundColor: color,
+                    .paragraphStyle: paragraphStyle
+                ]
+            )
+        )
+    }
+
+    private func previewIndentPoints(
+        _ measurement: ParagraphIndentMeasurement?,
+        fontSize: Double
+    ) -> Double {
+        guard let measurement else { return 0 }
+        return min(max(measurement.previewPoints(fontSize: fontSize), -24), 120)
+    }
+
+    private func nsTextAlignment(_ value: String?) -> NSTextAlignment {
+        switch ParagraphAlignmentEditChoice.canonical(value) {
+        case "center": return .center
+        case "right": return .right
+        case "both", "distribute": return .justified
+        default: return .left
+        }
+    }
+
+    private func nsColorFromHex(_ value: String) -> NSColor? {
+        guard let normalized = normalizedHexColor(value),
+              let rgb = UInt64(normalized, radix: 16) else { return nil }
+        return NSColor(
+            red: CGFloat((rgb >> 16) & 0xFF) / 255,
+            green: CGFloat((rgb >> 8) & 0xFF) / 255,
+            blue: CGFloat(rgb & 0xFF) / 255,
+            alpha: 1
+        )
+    }
+}
+
 private struct PreviewPropertyRow: View {
     let label: String
     let value: String
@@ -2661,6 +3641,110 @@ private struct PreviewPropertyRow: View {
             Rectangle().fill(Palette.line.opacity(0.65)).frame(height: 1)
         }
     }
+}
+
+private func paragraphAlignmentText(_ alignment: String?) -> String {
+    switch ParagraphAlignmentEditChoice.canonical(alignment) {
+    case "center": return "居中"
+    case "right": return "右对齐"
+    case "both": return "两端对齐"
+    case "distribute": return "分散对齐"
+    case "left": return "左对齐"
+    case .some(let value): return "其他（\(value)）"
+    case nil: return "继承"
+    }
+}
+
+private func paragraphSpacingText(before: Double?, after: Double?) -> String {
+    let beforeText = before.map { "\(paragraphNumber($0)) pt" } ?? "继承"
+    let afterText = after.map { "\(paragraphNumber($0)) pt" } ?? "继承"
+    return "\(beforeText) / \(afterText)"
+}
+
+private func paragraphLineSpacingText(value: Double?, rule: String?) -> String {
+    guard let value else { return "继承" }
+    switch LineSpacingEditChoice.canonical(rule, spacing: value) {
+    case "exact": return "固定值 \(paragraphNumber(value)) pt"
+    case "atLeast": return "最小值 \(paragraphNumber(value)) pt"
+    case "auto", nil: return "\(paragraphNumber(value)) 倍"
+    case .some(let raw): return "\(paragraphNumber(value)) pt（\(raw)）"
+    }
+}
+
+private func paragraphIndentSidesText(_ format: UsedFormat) -> String {
+    paragraphIndentSidesText(
+        left: preferredParagraphIndentMeasurement(
+            chars: format.leftIndentChars,
+            points: format.leftIndentPt
+        ),
+        right: preferredParagraphIndentMeasurement(
+            chars: format.rightIndentChars,
+            points: format.rightIndentPt
+        )
+    )
+}
+
+private func paragraphIndentSidesText(
+    left: ParagraphIndentMeasurement?,
+    right: ParagraphIndentMeasurement?
+) -> String {
+    "左 \(left?.displayText ?? "继承")，右 \(right?.displayText ?? "继承")"
+}
+
+private func paragraphSpecialIndentText(_ format: UsedFormat) -> String {
+    if let measurement = preferredNonzeroParagraphIndentMeasurement(
+        chars: format.firstLineIndentChars,
+        points: format.firstLineIndentPt
+    ) {
+        return paragraphSpecialIndentText(choice: .firstLine, measurement: measurement)
+    }
+    if let measurement = preferredNonzeroParagraphIndentMeasurement(
+        chars: format.hangingIndentChars,
+        points: format.hangingIndentPt
+    ) {
+        return paragraphSpecialIndentText(choice: .hanging, measurement: measurement)
+    }
+    return "无"
+}
+
+private func paragraphSpecialIndentText(
+    choice: SpecialIndentEditChoice,
+    measurement: ParagraphIndentMeasurement?
+) -> String {
+    switch choice {
+    case .firstLine:
+        return "首行 \(measurement?.displayText ?? "待填写")"
+    case .hanging:
+        return "悬挂 \(measurement?.displayText ?? "待填写")"
+    case .none, .unchanged:
+        return "无"
+    }
+}
+
+private func preferredParagraphIndentMeasurement(
+    chars: Double?,
+    points: Double?
+) -> ParagraphIndentMeasurement? {
+    if let chars {
+        return ParagraphIndentMeasurement(value: chars, unit: .characters)
+    }
+    if let points {
+        return ParagraphIndentMeasurement(value: points, unit: .points)
+    }
+    return nil
+}
+
+private func preferredNonzeroParagraphIndentMeasurement(
+    chars: Double?,
+    points: Double?
+) -> ParagraphIndentMeasurement? {
+    if let chars, abs(chars) >= 0.0001 {
+        return ParagraphIndentMeasurement(value: chars, unit: .characters)
+    }
+    if let points, abs(points) >= 0.0001 {
+        return ParagraphIndentMeasurement(value: points, unit: .points)
+    }
+    return nil
 }
 
 private func styleTypeText(_ format: UsedFormat) -> String {
@@ -3056,9 +4140,32 @@ private struct StyleInspector: View {
                         PropertyRow(label: "字形", value: fontTraits(format))
                         PropertyRow(label: "颜色", value: format.colorHex.map { "#\($0)" } ?? "自动")
                         if format.type == "paragraph" {
-                            PropertyRow(label: "对齐", value: alignmentText(format.alignment))
-                            PropertyRow(label: "段前 / 段后", value: spacingText(format))
-                            PropertyRow(label: "行距", value: lineSpacingText(format))
+                            PropertyRow(
+                                label: "对齐",
+                                value: paragraphAlignmentText(format.alignment)
+                            )
+                            PropertyRow(
+                                label: "段前 / 段后",
+                                value: paragraphSpacingText(
+                                    before: format.spaceBeforePt,
+                                    after: format.spaceAfterPt
+                                )
+                            )
+                            PropertyRow(
+                                label: "行距",
+                                value: paragraphLineSpacingText(
+                                    value: format.lineSpacing,
+                                    rule: format.lineRule
+                                )
+                            )
+                            PropertyRow(
+                                label: "左 / 右缩进",
+                                value: paragraphIndentSidesText(format)
+                            )
+                            PropertyRow(
+                                label: "特殊缩进",
+                                value: paragraphSpecialIndentText(format)
+                            )
                             if let level = format.outlineLevel {
                                 PropertyRow(label: "大纲级别", value: "\(level + 1) 级")
                             }
@@ -3111,30 +4218,6 @@ private struct StyleInspector: View {
         if format.bold == true { traits.append("粗体") }
         if format.italic == true { traits.append("斜体") }
         return traits.isEmpty ? "常规" : traits.joined(separator: "、")
-    }
-
-    private func alignmentText(_ alignment: String?) -> String {
-        switch alignment {
-        case "center": return "居中"
-        case "right", "end": return "右对齐"
-        case "both", "distribute": return "两端对齐"
-        case "left", "start": return "左对齐"
-        default: return "继承"
-        }
-    }
-
-    private func spacingText(_ format: UsedFormat) -> String {
-        let before = format.spaceBeforePt.map(number) ?? "—"
-        let after = format.spaceAfterPt.map(number) ?? "—"
-        return "\(before) / \(after) pt"
-    }
-
-    private func lineSpacingText(_ format: UsedFormat) -> String {
-        guard let value = format.lineSpacing else { return "继承" }
-        if format.lineRule == nil || format.lineRule == "auto" {
-            return "\(number(value)) 倍"
-        }
-        return "\(number(value)) pt"
     }
 
     private func hexText(_ value: String?) -> String {
@@ -3741,6 +4824,20 @@ private struct BusyOverlay: View {
 private func number(_ value: Double) -> String {
     if value.rounded() == value { return String(Int(value)) }
     return String(format: "%.1f", value)
+}
+
+private func paragraphNumber(_ value: Double) -> String {
+    if abs(value.rounded() - value) < 0.000_001 {
+        return String(Int(value.rounded()))
+    }
+    var rendered = String(
+        format: "%.2f",
+        locale: Locale(identifier: "en_US_POSIX"),
+        value
+    )
+    while rendered.last == "0" { rendered.removeLast() }
+    if rendered.last == "." { rendered.removeLast() }
+    return rendered
 }
 
 #if !WORD_FORMAT_LIBRARY_TESTING
