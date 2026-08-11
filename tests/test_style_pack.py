@@ -180,8 +180,8 @@ class StylePackTests(unittest.TestCase):
             self.assertEqual(preview["color_hex"], color)
             self.assertEqual(preview["outline_level"], outline)
             self.assertIs(preview["bold"], True)
-            self.assertEqual(preview["font_latin"], "Arial")
-            self.assertEqual(preview["font_east_asia"], "Hiragino Sans GB")
+            self.assertEqual(preview["font_latin"], "Calibri")
+            self.assertEqual(preview["font_east_asia"], "ＭＳ ゴシック")
 
         self.assertEqual(by_id["Normal"]["size_pt"], 11.0)
         self.assertEqual(by_id["Normal"]["color_hex"], "222222")

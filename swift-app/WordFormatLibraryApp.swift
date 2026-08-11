@@ -16,6 +16,8 @@ struct UsedFormat: Codable, Hashable, Identifiable {
     let sample: String
     let fontLatin: String?
     let fontEastAsia: String?
+    let fontLatinAliases: [String]?
+    let fontEastAsiaAliases: [String]?
     let sizePt: Double?
     let bold: Bool?
     let italic: Bool?
@@ -54,6 +56,8 @@ struct UsedFormat: Codable, Hashable, Identifiable {
         case sample
         case fontLatin = "font_latin"
         case fontEastAsia = "font_east_asia"
+        case fontLatinAliases = "font_latin_aliases"
+        case fontEastAsiaAliases = "font_east_asia_aliases"
         case sizePt = "size_pt"
         case bold, italic
         case colorHex = "color_hex"
@@ -79,6 +83,426 @@ struct UsedFormat: Codable, Hashable, Identifiable {
         case tableFillHex = "table_fill_hex"
         case tableAccentHex = "table_accent_hex"
     }
+}
+
+// MARK: - Local font discovery and template font aliases
+
+struct InstalledFontFaceRecord: Hashable {
+    let familyName: String
+    let localizedFamilyName: String?
+    let postScriptName: String
+    let displayName: String?
+    let faceName: String?
+    let weight: Int
+    let traitsRawValue: UInt
+
+    init(
+        familyName: String,
+        localizedFamilyName: String? = nil,
+        postScriptName: String,
+        displayName: String? = nil,
+        faceName: String? = nil,
+        weight: Int = 5,
+        traitsRawValue: UInt = 0
+    ) {
+        self.familyName = familyName
+        self.localizedFamilyName = localizedFamilyName
+        self.postScriptName = postScriptName
+        self.displayName = displayName
+        self.faceName = faceName
+        self.weight = weight
+        self.traitsRawValue = traitsRawValue
+    }
+}
+
+struct InstalledFontFamily: Hashable, Identifiable {
+    let canonicalFamilyName: String
+    let localizedFamilyNames: [String]
+    let postScriptNames: [String]
+    let displayNames: [String]
+    let faceNames: [String]
+    let preferredPostScriptName: String
+    fileprivate let records: [InstalledFontFaceRecord]
+
+    var id: String { fontStrictLookupKey(canonicalFamilyName) }
+
+    var displayName: String {
+        localizedFamilyNames.first(where: {
+            fontStrictLookupKey($0) != fontStrictLookupKey(canonicalFamilyName)
+        }) ?? canonicalFamilyName
+    }
+
+    var secondaryDescription: String {
+        var values: [String] = []
+        if displayName != canonicalFamilyName { values.append(canonicalFamilyName) }
+        if preferredPostScriptName != canonicalFamilyName {
+            values.append(preferredPostScriptName)
+        }
+        return values.joined(separator: " · ")
+    }
+
+    fileprivate var searchableNames: [String] {
+        uniqueFontNames(
+            [canonicalFamilyName] + localizedFamilyNames + postScriptNames +
+                displayNames + faceNames
+        )
+    }
+
+    fileprivate func exactPostScriptName(for rawName: String) -> String? {
+        let key = fontStrictLookupKey(rawName)
+        return postScriptNames.first { fontStrictLookupKey($0) == key }
+    }
+}
+
+enum InstalledFontMatchKind: String, Equatable {
+    case inherited
+    case installed
+    case alias
+    case ambiguous
+    case missing
+}
+
+struct InstalledFontMatch: Equatable {
+    let kind: InstalledFontMatchKind
+    let canonicalFamilyName: String?
+    let postScriptName: String?
+    let candidateFamilyNames: [String]
+
+    var isUsableForPreview: Bool {
+        kind == .installed || kind == .alias
+    }
+}
+
+struct InstalledFontCatalog {
+    let families: [InstalledFontFamily]
+    private let strictAliasIndex: [String: Set<String>]
+    private let compactAliasIndex: [String: Set<String>]
+    private let familiesByID: [String: InstalledFontFamily]
+
+    init(records: [InstalledFontFaceRecord]) {
+        var grouped: [String: [InstalledFontFaceRecord]] = [:]
+        for record in records {
+            let family = record.familyName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let postScript = record.postScriptName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !family.isEmpty, !postScript.isEmpty else { continue }
+            let normalizedRecord = InstalledFontFaceRecord(
+                familyName: family,
+                localizedFamilyName: normalizedFontName(record.localizedFamilyName),
+                postScriptName: postScript,
+                displayName: normalizedFontName(record.displayName),
+                faceName: normalizedFontName(record.faceName),
+                weight: record.weight,
+                traitsRawValue: record.traitsRawValue
+            )
+            grouped[fontStrictLookupKey(family), default: []].append(normalizedRecord)
+        }
+
+        var built: [InstalledFontFamily] = []
+        for records in grouped.values {
+            guard let first = records.first else { continue }
+            let orderedRecords = records.sorted(by: preferredFontRecordOrder)
+            let canonical = records
+                .map(\.familyName)
+                .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+                .first ?? first.familyName
+            built.append(
+                InstalledFontFamily(
+                    canonicalFamilyName: canonical,
+                    localizedFamilyNames: uniqueFontNames(
+                        records.compactMap(\.localizedFamilyName)
+                    ),
+                    postScriptNames: uniqueFontNames(records.map(\.postScriptName)),
+                    displayNames: uniqueFontNames(records.compactMap(\.displayName)),
+                    faceNames: uniqueFontNames(records.compactMap(\.faceName)),
+                    preferredPostScriptName: orderedRecords[0].postScriptName,
+                    records: orderedRecords
+                )
+            )
+        }
+        built.sort {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+        families = built
+        familiesByID = Dictionary(uniqueKeysWithValues: built.map { ($0.id, $0) })
+
+        var strictAliases: [String: Set<String>] = [:]
+        var compactAliases: [String: Set<String>] = [:]
+        for family in built {
+            for name in family.searchableNames {
+                let strictKey = fontStrictLookupKey(name)
+                if !strictKey.isEmpty {
+                    strictAliases[strictKey, default: []].insert(family.id)
+                }
+                let compactKey = fontCompactLookupKey(name)
+                if !compactKey.isEmpty {
+                    compactAliases[compactKey, default: []].insert(family.id)
+                }
+            }
+        }
+        strictAliasIndex = strictAliases
+        compactAliasIndex = compactAliases
+    }
+
+    static func system() -> InstalledFontCatalog {
+        let manager = NSFontManager.shared
+        var recordsByPostScript: [String: InstalledFontFaceRecord] = [:]
+
+        for family in manager.availableFontFamilies {
+            let localizedFamily = normalizedFontName(
+                manager.localizedName(forFamily: family, face: nil)
+            )
+            let members = manager.availableMembers(ofFontFamily: family) ?? []
+            for member in members {
+                guard let postScript = member.first as? String else { continue }
+                let face = member.count > 1 ? member[1] as? String : nil
+                let weight = (member.count > 2 ? member[2] as? NSNumber : nil)?.intValue ?? 5
+                let traits = (member.count > 3 ? member[3] as? NSNumber : nil)?.uintValue ?? 0
+                let font = NSFont(name: postScript, size: 12)
+                let record = InstalledFontFaceRecord(
+                    familyName: font?.familyName ?? family,
+                    localizedFamilyName: localizedFamily,
+                    postScriptName: font?.fontName ?? postScript,
+                    displayName: font?.displayName,
+                    faceName: face,
+                    weight: weight,
+                    traitsRawValue: traits
+                )
+                recordsByPostScript[fontStrictLookupKey(record.postScriptName)] = record
+            }
+        }
+
+        // Some registered faces are not returned by availableMembers on all macOS
+        // releases.  Keep them searchable by their PostScript names as well.
+        for postScript in manager.availableFonts {
+            let key = fontStrictLookupKey(postScript)
+            if recordsByPostScript[key] != nil { continue }
+            guard let font = NSFont(name: postScript, size: 12) else { continue }
+            let family = font.familyName ?? postScript
+            recordsByPostScript[key] = InstalledFontFaceRecord(
+                familyName: family,
+                localizedFamilyName: normalizedFontName(
+                    manager.localizedName(forFamily: family, face: nil)
+                ),
+                postScriptName: font.fontName,
+                displayName: font.displayName,
+                faceName: nil,
+                weight: manager.weight(of: font),
+                traitsRawValue: manager.traits(of: font).rawValue
+            )
+        }
+
+        return InstalledFontCatalog(records: Array(recordsByPostScript.values))
+    }
+
+    // Font discovery can involve hundreds of faces. Reuse the latest complete
+    // scan when editors are reopened. SwiftUI invokes both accessors on the
+    // main thread, so a manual refresh can safely replace this process cache.
+    private static var cachedSystemStorage = InstalledFontCatalog.system()
+
+    static var cachedSystem: InstalledFontCatalog { cachedSystemStorage }
+
+    static func refreshSystem() -> InstalledFontCatalog {
+        let refreshed = InstalledFontCatalog.system()
+        cachedSystemStorage = refreshed
+        return refreshed
+    }
+
+    func match(name: String?, aliases: [String] = []) -> InstalledFontMatch {
+        guard let rawName = normalizedFontName(name) else {
+            return InstalledFontMatch(
+                kind: .inherited,
+                canonicalFamilyName: nil,
+                postScriptName: nil,
+                candidateFamilyNames: []
+            )
+        }
+
+        // The document's primary name has priority.  A supplemental w:altName
+        // must never turn an already unique family/PostScript match into a
+        // conflict with an unrelated installed family.
+        let strictRawCandidateIDs = strictAliasIndex[fontStrictLookupKey(rawName)] ?? []
+        let rawCandidateIDs = strictRawCandidateIDs.isEmpty
+            ? (compactAliasIndex[fontCompactLookupKey(rawName)] ?? [])
+            : strictRawCandidateIDs
+        let candidateIDs: Set<String>
+        if rawCandidateIDs.isEmpty {
+            var aliasCandidateIDs: Set<String> = []
+            for alias in aliases.compactMap(normalizedFontName) {
+                let strictIDs = strictAliasIndex[fontStrictLookupKey(alias)] ?? []
+                aliasCandidateIDs.formUnion(
+                    strictIDs.isEmpty
+                        ? (compactAliasIndex[fontCompactLookupKey(alias)] ?? [])
+                        : strictIDs
+                )
+            }
+            candidateIDs = aliasCandidateIDs
+        } else {
+            candidateIDs = rawCandidateIDs
+        }
+        let matchedFamilies = candidateIDs.compactMap { familiesByID[$0] }.sorted {
+            $0.canonicalFamilyName.localizedCaseInsensitiveCompare($1.canonicalFamilyName) ==
+                .orderedAscending
+        }
+        guard matchedFamilies.count == 1, let family = matchedFamilies.first else {
+            return InstalledFontMatch(
+                kind: matchedFamilies.isEmpty ? .missing : .ambiguous,
+                canonicalFamilyName: nil,
+                postScriptName: nil,
+                candidateFamilyNames: matchedFamilies.map(\.canonicalFamilyName)
+            )
+        }
+
+        let strictRaw = fontStrictLookupKey(rawName)
+        let isRegisteredName = fontStrictLookupKey(family.canonicalFamilyName) == strictRaw ||
+            family.postScriptNames.contains { fontStrictLookupKey($0) == strictRaw }
+        return InstalledFontMatch(
+            kind: isRegisteredName ? .installed : .alias,
+            canonicalFamilyName: family.canonicalFamilyName,
+            postScriptName: family.exactPostScriptName(for: rawName) ??
+                family.preferredPostScriptName,
+            candidateFamilyNames: [family.canonicalFamilyName]
+        )
+    }
+
+    func search(_ query: String) -> [InstalledFontFamily] {
+        let key = fontCompactLookupKey(query)
+        guard !key.isEmpty else { return families }
+        return families.filter { family in
+            family.searchableNames.contains {
+                fontCompactLookupKey($0).contains(key)
+            }
+        }
+    }
+}
+
+enum TemplateFontRole {
+    case latin
+    case eastAsia
+}
+
+struct TemplateFontOption: Hashable, Identifiable {
+    let name: String
+    let aliases: [String]
+
+    var id: String { fontStrictLookupKey(name) }
+
+    func matches(_ query: String) -> Bool {
+        let key = fontCompactLookupKey(query)
+        guard !key.isEmpty else { return true }
+        return ([name] + aliases).contains {
+            fontCompactLookupKey($0).contains(key)
+        }
+    }
+}
+
+func templateFontOptions(
+    from formats: [UsedFormat],
+    role: TemplateFontRole
+) -> [TemplateFontOption] {
+    var namesByKey: [String: String] = [:]
+    var aliasesByKey: [String: Set<String>] = [:]
+    for format in formats {
+        let rawName: String?
+        let rawAliases: [String]
+        switch role {
+        case .latin:
+            rawName = format.fontLatin
+            rawAliases = format.fontLatinAliases ?? []
+        case .eastAsia:
+            rawName = format.fontEastAsia
+            rawAliases = format.fontEastAsiaAliases ?? []
+        }
+        guard let name = normalizedFontName(rawName) else { continue }
+        let key = fontStrictLookupKey(name)
+        namesByKey[key] = namesByKey[key] ?? name
+        for alias in rawAliases.compactMap(normalizedFontName)
+            where fontStrictLookupKey(alias) != key {
+            aliasesByKey[key, default: []].insert(alias)
+        }
+    }
+    return namesByKey.map { key, name in
+        TemplateFontOption(
+            name: name,
+            aliases: (aliasesByKey[key] ?? []).sorted {
+                $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+            }
+        )
+    }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+}
+
+private func templateAliases(
+    for name: String?,
+    in options: [TemplateFontOption]
+) -> [String] {
+    guard let name = normalizedFontName(name) else { return [] }
+    let key = fontStrictLookupKey(name)
+    return options.first { $0.id == key }?.aliases ?? []
+}
+
+private func localPreviewDescription(
+    requestedName: String?,
+    match: InstalledFontMatch
+) -> String {
+    guard normalizedFontName(requestedName) != nil else {
+        return "继承主题，本机使用系统字体示意"
+    }
+    switch match.kind {
+    case .inherited:
+        return "继承主题"
+    case .installed:
+        return match.postScriptName ?? "本机字体"
+    case .alias:
+        return match.postScriptName.map { "别名解析为 \($0)" } ?? "已通过别名解析"
+    case .ambiguous:
+        return "名称匹配冲突，预览使用系统字体"
+    case .missing:
+        return "本机未注册，预览使用系统字体"
+    }
+}
+
+private func normalizedFontName(_ value: String?) -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+}
+
+private func fontStrictLookupKey(_ value: String) -> String {
+    value.folding(
+        options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+        locale: Locale(identifier: "en_US_POSIX")
+    )
+}
+
+private func fontCompactLookupKey(_ value: String) -> String {
+    let folded = fontStrictLookupKey(value)
+    return String(folded.unicodeScalars.filter {
+        CharacterSet.alphanumerics.contains($0)
+    })
+}
+
+private func uniqueFontNames(_ names: [String]) -> [String] {
+    var seen: Set<String> = []
+    var result: [String] = []
+    for name in names.compactMap(normalizedFontName) {
+        let key = fontStrictLookupKey(name)
+        if seen.insert(key).inserted { result.append(name) }
+    }
+    return result.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+}
+
+private func preferredFontRecordOrder(
+    _ lhs: InstalledFontFaceRecord,
+    _ rhs: InstalledFontFaceRecord
+) -> Bool {
+    let styleMask = NSFontTraitMask.boldFontMask.rawValue |
+        NSFontTraitMask.italicFontMask.rawValue
+    let lhsStyled = lhs.traitsRawValue & styleMask != 0
+    let rhsStyled = rhs.traitsRawValue & styleMask != 0
+    if lhsStyled != rhsStyled { return !lhsStyled }
+    let lhsDistance = abs(lhs.weight - 5)
+    let rhsDistance = abs(rhs.weight - 5)
+    if lhsDistance != rhsDistance { return lhsDistance < rhsDistance }
+    return lhs.postScriptName.localizedCaseInsensitiveCompare(rhs.postScriptName) == .orderedAscending
 }
 
 struct ManualFormatting: Codable, Hashable {
@@ -2486,6 +2910,9 @@ private struct StyleEditorSheet: View {
     @State private var isShowingError = false
     @State private var isConfirmingDiscard = false
     @State private var editorNotice: String?
+    @State private var installedFontCatalog: InstalledFontCatalog
+    private let templateLatinFonts: [TemplateFontOption]
+    private let templateEastAsiaFonts: [TemplateFontOption]
 
     init(model: WordFormatLibraryModel, pack: PackManifest) {
         self.model = model
@@ -2501,6 +2928,9 @@ private struct StyleEditorSheet: View {
         _drafts = State(initialValue: initialDrafts)
         _selectedDraftID = State(initialValue: initialDrafts.first?.id)
         _schemeName = State(initialValue: "\(pack.name) · 自定义")
+        _installedFontCatalog = State(initialValue: .cachedSystem)
+        templateLatinFonts = templateFontOptions(from: editableFormats, role: .latin)
+        templateEastAsiaFonts = templateFontOptions(from: editableFormats, role: .eastAsia)
     }
 
     private var filteredDrafts: [StyleEditDraft] {
@@ -2564,10 +2994,20 @@ private struct StyleEditorSheet: View {
                     .frame(width: 265)
                 Divider().overlay(Palette.line)
                 if let selectedIndex {
-                    StyleEditControls(draft: $drafts[selectedIndex])
+                    StyleEditControls(
+                        draft: $drafts[selectedIndex],
+                        installedFontCatalog: $installedFontCatalog,
+                        templateLatinFonts: templateLatinFonts,
+                        templateEastAsiaFonts: templateEastAsiaFonts
+                    )
                         .frame(minWidth: 330, maxWidth: .infinity, maxHeight: .infinity)
                     Divider().overlay(Palette.line)
-                    StyleEditLivePreview(draft: drafts[selectedIndex])
+                    StyleEditLivePreview(
+                        draft: drafts[selectedIndex],
+                        installedFontCatalog: installedFontCatalog,
+                        templateLatinFonts: templateLatinFonts,
+                        templateEastAsiaFonts: templateEastAsiaFonts
+                    )
                         .frame(width: 330)
                         .frame(maxHeight: .infinity)
                 } else {
@@ -2814,6 +3254,9 @@ private struct StyleEditorSheet: View {
 
 private struct StyleEditControls: View {
     @Binding var draft: StyleEditDraft
+    @Binding var installedFontCatalog: InstalledFontCatalog
+    let templateLatinFonts: [TemplateFontOption]
+    let templateEastAsiaFonts: [TemplateFontOption]
 
     var body: some View {
         ScrollView {
@@ -2862,12 +3305,18 @@ private struct StyleEditControls: View {
                         FontOverrideField(
                             label: "中文字体",
                             original: draft.format.fontEastAsia,
-                            value: $draft.fontEastAsiaOverride
+                            originalAliases: draft.format.fontEastAsiaAliases ?? [],
+                            templateFonts: templateEastAsiaFonts,
+                            value: $draft.fontEastAsiaOverride,
+                            installedFontCatalog: $installedFontCatalog
                         )
                         FontOverrideField(
                             label: "西文字体",
                             original: draft.format.fontLatin,
-                            value: $draft.fontLatinOverride
+                            originalAliases: draft.format.fontLatinAliases ?? [],
+                            templateFonts: templateLatinFonts,
+                            value: $draft.fontLatinOverride,
+                            installedFontCatalog: $installedFontCatalog
                         )
                         HStack {
                             StyleEditorControlLabel("字号")
@@ -3248,44 +3697,371 @@ private struct EditorOriginalValue: View {
 private struct FontOverrideField: View {
     let label: String
     let original: String?
+    let originalAliases: [String]
+    let templateFonts: [TemplateFontOption]
     @Binding var value: String
+    @Binding var installedFontCatalog: InstalledFontCatalog
+    @State private var isShowingPicker = false
+    @State private var searchText = ""
 
-    private static let installedFamilies = NSFontManager.shared.availableFontFamilies
-        .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    private var allTemplateFonts: [TemplateFontOption] {
+        guard let original = normalizedFontName(original) else { return templateFonts }
+        let key = fontStrictLookupKey(original)
+        if templateFonts.contains(where: { $0.id == key }) { return templateFonts }
+        return ([TemplateFontOption(name: original, aliases: originalAliases)] + templateFonts)
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private var activeName: String? {
+        normalizedFontName(value) ?? normalizedFontName(original)
+    }
+
+    private var activeAliases: [String] {
+        guard let activeName else { return [] }
+        if fontStrictLookupKey(activeName) == fontStrictLookupKey(original ?? "") {
+            return originalAliases
+        }
+        return allTemplateFonts.first {
+            fontStrictLookupKey($0.name) == fontStrictLookupKey(activeName)
+        }?.aliases ?? []
+    }
+
+    private var activeMatch: InstalledFontMatch {
+        installedFontCatalog.match(name: activeName, aliases: activeAliases)
+    }
+
+    private var originalMatch: InstalledFontMatch {
+        installedFontCatalog.match(name: original, aliases: originalAliases)
+    }
 
     var body: some View {
-        HStack(spacing: 8) {
-            StyleEditorControlLabel(label)
-            TextField(
-                original.map { "原方案 \($0)" } ?? "继承主题字体",
-                text: $value
-            )
-            .textFieldStyle(.roundedBorder)
-            .accessibilityLabel(label)
-            Menu {
-                ForEach(Self.installedFamilies, id: \.self) { family in
-                    Button(family) { value = family }
-                }
-            } label: {
-                Image(systemName: "chevron.down")
-                    .frame(width: 22, height: 22)
-            }
-            .menuStyle(.borderlessButton)
-            .frame(width: 28)
-            .help("从本机已安装字体中选择")
-            .accessibilityLabel("选择\(label)")
-            if !value.isEmpty {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                StyleEditorControlLabel(label)
+                TextField(
+                    original.map { "原方案 \($0)" } ?? "继承主题字体",
+                    text: $value
+                )
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel(label)
                 Button {
-                    value = ""
+                    searchText = ""
+                    isShowingPicker = true
                 } label: {
-                    Image(systemName: "arrow.uturn.backward.circle")
+                    Image(systemName: "magnifyingglass")
+                        .frame(width: 22, height: 22)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
+                .frame(width: 28)
+                .help("搜索模板字体、本机字体或 PostScript 名")
+                .accessibilityLabel("搜索并选择\(label)")
+                .popover(isPresented: $isShowingPicker, arrowEdge: .bottom) {
+                    FontPickerPopover(
+                        label: label,
+                        original: original,
+                        originalAliases: originalAliases,
+                        templateFonts: allTemplateFonts,
+                        value: $value,
+                        installedFontCatalog: $installedFontCatalog,
+                        searchText: $searchText,
+                        isPresented: $isShowingPicker
+                    )
+                }
+                if !value.isEmpty {
+                    Button {
+                        value = ""
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Palette.mutedInk)
+                    .help("恢复原方案")
+                    .accessibilityLabel("恢复\(label)原值")
+                }
+            }
+
+            HStack(spacing: 6) {
+                Text(original.map { "原方案：\($0)" } ?? "原方案：继承主题字体")
+                    .lineLimit(1)
+                FontRegistrationBadge(match: originalMatch)
+            }
+            .font(.system(size: 10))
+            .foregroundStyle(Palette.mutedInk)
+            .padding(.leading, 98)
+            .accessibilityElement(children: .combine)
+
+            if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                HStack(spacing: 6) {
+                    Text("当前选择：\(activeName ?? value)")
+                        .lineLimit(1)
+                    FontRegistrationBadge(match: activeMatch)
+                }
+                .font(.system(size: 10))
                 .foregroundStyle(Palette.mutedInk)
-                .help("恢复原方案")
-                .accessibilityLabel("恢复\(label)原值")
+                .padding(.leading, 98)
+                .accessibilityElement(children: .combine)
+
+                if activeMatch.kind == .ambiguous &&
+                    !activeMatch.candidateFamilyNames.isEmpty {
+                    Text("候选字体：\(activeMatch.candidateFamilyNames.joined(separator: "、"))")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Palette.amber)
+                        .padding(.leading, 98)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
+    }
+}
+
+private struct FontPickerPopover: View {
+    let label: String
+    let original: String?
+    let originalAliases: [String]
+    let templateFonts: [TemplateFontOption]
+    @Binding var value: String
+    @Binding var installedFontCatalog: InstalledFontCatalog
+    @Binding var searchText: String
+    @Binding var isPresented: Bool
+    @FocusState private var isSearchFocused: Bool
+
+    private var filteredTemplateFonts: [TemplateFontOption] {
+        let originalKey = normalizedFontName(original).map(fontStrictLookupKey)
+        return templateFonts.filter {
+            $0.id != originalKey && $0.matches(searchText)
+        }
+    }
+
+    private var filteredInstalledFonts: [InstalledFontFamily] {
+        let matches = installedFontCatalog.search(searchText)
+        guard let originalKey = normalizedFontName(original).map(fontStrictLookupKey) else {
+            return matches
+        }
+        return matches.filter {
+            fontStrictLookupKey($0.canonicalFamilyName) != originalKey
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                TextField("搜索字体、中文名或 PostScript 名", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("搜索\(label)")
+                    .focused($isSearchFocused)
+                Button {
+                    installedFontCatalog = .refreshSystem()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("刷新本机字体")
+                .accessibilityLabel("刷新本机字体")
+            }
+            .padding(12)
+
+            Divider().overlay(Palette.line)
+
+            Label(
+                "本机未注册的字体可能仅由 Microsoft Word 提供；可保留原名，但程序预览会使用系统字体。",
+                systemImage: "info.circle"
+            )
+            .font(.system(size: 10))
+            .foregroundStyle(Palette.mutedInk)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 7) {
+                    FontPickerSectionLabel("原方案")
+                    FontChoiceButton(
+                        title: original ?? "继承主题字体",
+                        detail: "保持模板中的原始设置，不重写字体名称",
+                        match: installedFontCatalog.match(
+                            name: original,
+                            aliases: originalAliases
+                        ),
+                        isSelected: value.isEmpty
+                    ) {
+                        value = ""
+                        isPresented = false
+                    }
+
+                    if !filteredTemplateFonts.isEmpty {
+                        FontPickerSectionLabel("模板中使用的字体")
+                        ForEach(filteredTemplateFonts) { option in
+                            FontChoiceButton(
+                                title: option.name,
+                                detail: option.aliases.isEmpty
+                                    ? "保留模板原始字体名称"
+                                    : "别名：\(option.aliases.joined(separator: "、"))",
+                                match: installedFontCatalog.match(
+                                    name: option.name,
+                                    aliases: option.aliases
+                                ),
+                                isSelected: fontStrictLookupKey(value) == option.id
+                            ) {
+                                value = option.name
+                                isPresented = false
+                            }
+                        }
+                    }
+
+                    FontPickerSectionLabel("本机已安装字体")
+                    if filteredInstalledFonts.isEmpty {
+                        Text("没有匹配的本机字体。仍可直接输入模板字体名称。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Palette.mutedInk)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 10)
+                    } else {
+                        ForEach(filteredInstalledFonts) { family in
+                            FontChoiceButton(
+                                title: family.displayName,
+                                detail: family.secondaryDescription,
+                                match: InstalledFontMatch(
+                                    kind: .installed,
+                                    canonicalFamilyName: family.canonicalFamilyName,
+                                    postScriptName: family.preferredPostScriptName,
+                                    candidateFamilyNames: [family.canonicalFamilyName]
+                                ),
+                                isSelected: fontStrictLookupKey(value) ==
+                                    fontStrictLookupKey(family.canonicalFamilyName)
+                            ) {
+                                // OOXML expects a family name.  PostScript names remain
+                                // searchable aliases and are used only for local preview.
+                                value = family.canonicalFamilyName
+                                isPresented = false
+                            }
+                        }
+                    }
+                }
+                .padding(10)
+            }
+        }
+        .frame(width: 430, height: 520)
+        .background(Palette.paper)
+        .onAppear { isSearchFocused = true }
+        .onExitCommand { isPresented = false }
+    }
+}
+
+private struct FontPickerSectionLabel: View {
+    let title: String
+
+    init(_ title: String) {
+        self.title = title
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 10.5, weight: .semibold))
+            .foregroundStyle(Palette.mutedInk)
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+private struct FontChoiceButton: View {
+    let title: String
+    let detail: String
+    let match: InstalledFontMatch
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? Palette.green : Palette.mutedInk)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                        .lineLimit(1)
+                    if !detail.isEmpty {
+                        Text(detail)
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(Palette.mutedInk)
+                            .lineLimit(2)
+                    }
+                    if match.kind == .ambiguous && !match.candidateFamilyNames.isEmpty {
+                        Text("候选：\(match.candidateFamilyNames.joined(separator: "、"))")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(Palette.amber)
+                            .lineLimit(2)
+                    }
+                }
+                Spacer(minLength: 6)
+                FontRegistrationBadge(match: match)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 8)
+            .background(isSelected ? Palette.mint.opacity(0.8) : Color.white.opacity(0.62))
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(
+            [
+                isSelected ? "已选择" : nil,
+                fontRegistrationText(match),
+                detail.isEmpty ? nil : detail,
+                match.kind == .ambiguous && !match.candidateFamilyNames.isEmpty
+                    ? "候选\(match.candidateFamilyNames.joined(separator: "、"))"
+                    : nil
+            ]
+            .compactMap { $0 }
+            .joined(separator: "，")
+        )
+    }
+}
+
+private struct FontRegistrationBadge: View {
+    let match: InstalledFontMatch
+
+    var body: some View {
+        Label(fontRegistrationText(match), systemImage: fontRegistrationIcon(match))
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(fontRegistrationColor(match))
+            .lineLimit(1)
+    }
+}
+
+private func fontRegistrationText(_ match: InstalledFontMatch) -> String {
+    switch match.kind {
+    case .inherited:
+        return "继承主题"
+    case .installed:
+        return "已安装"
+    case .alias:
+        return match.canonicalFamilyName.map { "别名匹配：\($0)" } ?? "别名匹配"
+    case .ambiguous:
+        return "匹配冲突"
+    case .missing:
+        return "本机未注册"
+    }
+}
+
+private func fontRegistrationIcon(_ match: InstalledFontMatch) -> String {
+    switch match.kind {
+    case .inherited: return "arrow.triangle.branch"
+    case .installed: return "checkmark.circle.fill"
+    case .alias: return "link.circle.fill"
+    case .ambiguous: return "exclamationmark.triangle.fill"
+    case .missing: return "arrow.triangle.2.circlepath.circle"
+    }
+}
+
+private func fontRegistrationColor(_ match: InstalledFontMatch) -> Color {
+    switch match.kind {
+    case .inherited: return Palette.mutedInk
+    case .installed, .alias: return Palette.green
+    case .ambiguous: return Palette.amber
+    case .missing: return Palette.mutedInk
     }
 }
 
@@ -3339,6 +4115,29 @@ private struct EditorColorField: View {
 
 private struct StyleEditLivePreview: View {
     let draft: StyleEditDraft
+    let installedFontCatalog: InstalledFontCatalog
+    let templateLatinFonts: [TemplateFontOption]
+    let templateEastAsiaFonts: [TemplateFontOption]
+
+    private var eastAsiaMatch: InstalledFontMatch {
+        installedFontCatalog.match(
+            name: draft.effectiveFontEastAsia,
+            aliases: templateAliases(
+                for: draft.effectiveFontEastAsia,
+                in: templateEastAsiaFonts
+            )
+        )
+    }
+
+    private var latinMatch: InstalledFontMatch {
+        installedFontCatalog.match(
+            name: draft.effectiveFontLatin,
+            aliases: templateAliases(
+                for: draft.effectiveFontLatin,
+                in: templateLatinFonts
+            )
+        )
+    }
 
     var body: some View {
         ScrollView {
@@ -3368,6 +4167,20 @@ private struct StyleEditLivePreview: View {
                         PreviewPropertyRow(
                             label: "西文字体",
                             value: draft.effectiveFontLatin ?? "继承主题"
+                        )
+                        PreviewPropertyRow(
+                            label: "中文预览",
+                            value: localPreviewDescription(
+                                requestedName: draft.effectiveFontEastAsia,
+                                match: eastAsiaMatch
+                            )
+                        )
+                        PreviewPropertyRow(
+                            label: "英文预览",
+                            value: localPreviewDescription(
+                                requestedName: draft.effectiveFontLatin,
+                                match: latinMatch
+                            )
                         )
                         PreviewPropertyRow(
                             label: "字号",
@@ -3445,20 +4258,30 @@ private struct StyleEditLivePreview: View {
 
     private var textPreview: some View {
         let size = min(max(draft.effectiveSize ?? 16, 11), 34)
-        let fontName = draft.effectiveFontEastAsia ?? draft.effectiveFontLatin
         return VStack(alignment: .leading, spacing: 11) {
             if draft.supportsParagraphFormatting {
-                ParagraphStyleTextPreview(draft: draft)
+                ParagraphStyleTextPreview(
+                    draft: draft,
+                    installedFontCatalog: installedFontCatalog,
+                    templateLatinFonts: templateLatinFonts,
+                    templateEastAsiaFonts: templateEastAsiaFonts
+                )
                     .frame(maxWidth: .infinity, minHeight: 138, maxHeight: 168)
                     .accessibilityHidden(true)
             } else {
-                Text(draft.format.sample.isEmpty ? "标题与正文格式示意 Aa 123" : draft.format.sample)
-                    .font(fontName.map { .custom($0, size: size) } ?? .system(size: size))
-                    .fontWeight(draft.effectiveBold == true ? .bold : .regular)
-                    .italic(draft.format.italic == true)
-                    .foregroundStyle(draft.effectiveColorHex.map(Color.init(hex:)) ?? Palette.ink)
-                    .lineLimit(3)
-                    .frame(maxWidth: .infinity, minHeight: 94, alignment: .leading)
+                VStack(alignment: .leading, spacing: 8) {
+                    previewTextLine(
+                        "中文字体预览示意",
+                        match: eastAsiaMatch,
+                        size: size
+                    )
+                    previewTextLine(
+                        "English Typography Aa 123",
+                        match: latinMatch,
+                        size: size
+                    )
+                }
+                .frame(maxWidth: .infinity, minHeight: 94, alignment: .leading)
             }
             Rectangle()
                 .fill(Palette.line)
@@ -3475,6 +4298,22 @@ private struct StyleEditLivePreview: View {
                 .stroke(Palette.line, lineWidth: 1)
         }
         .shadow(color: Palette.ink.opacity(0.06), radius: 10, y: 4)
+    }
+
+    private func previewTextLine(
+        _ text: String,
+        match: InstalledFontMatch,
+        size: Double
+    ) -> some View {
+        Text(text)
+            .font(
+                match.postScriptName.map { .custom($0, size: size) } ??
+                    .system(size: size)
+            )
+            .fontWeight(draft.effectiveBold == true ? .bold : .regular)
+            .italic(draft.format.italic == true)
+            .foregroundStyle(draft.effectiveColorHex.map(Color.init(hex:)) ?? Palette.ink)
+            .lineLimit(2)
     }
 
     private var tablePreview: some View {
@@ -3509,6 +4348,9 @@ private struct StyleEditLivePreview: View {
 
 private struct ParagraphStyleTextPreview: NSViewRepresentable {
     let draft: StyleEditDraft
+    let installedFontCatalog: InstalledFontCatalog
+    let templateLatinFonts: [TemplateFontOption]
+    let templateEastAsiaFonts: [TemplateFontOption]
 
     func makeNSView(context: Context) -> NSTextView {
         let textView = NSTextView(frame: .zero)
@@ -3526,15 +4368,22 @@ private struct ParagraphStyleTextPreview: NSViewRepresentable {
 
     func updateNSView(_ textView: NSTextView, context: Context) {
         let size = min(max(draft.effectiveSize ?? 16, 11), 34)
-        let fontName = draft.effectiveFontEastAsia ?? draft.effectiveFontLatin
-        var font = fontName.flatMap { NSFont(name: $0, size: CGFloat(size)) }
-            ?? NSFont.systemFont(ofSize: CGFloat(size))
-        if draft.effectiveBold == true {
-            font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
-        }
-        if draft.format.italic == true {
-            font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
-        }
+        let eastAsiaFont = previewFont(
+            requestedName: draft.effectiveFontEastAsia,
+            aliases: templateAliases(
+                for: draft.effectiveFontEastAsia,
+                in: templateEastAsiaFonts
+            ),
+            size: size
+        )
+        let latinFont = previewFont(
+            requestedName: draft.effectiveFontLatin,
+            aliases: templateAliases(
+                for: draft.effectiveFontLatin,
+                in: templateLatinFonts
+            ),
+            size: size
+        )
 
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = nsTextAlignment(draft.effectiveAlignment)
@@ -3573,23 +4422,50 @@ private struct ParagraphStyleTextPreview: NSViewRepresentable {
             break
         }
 
-        let primary = draft.format.sample.isEmpty
-            ? "标题与正文格式示意 Aa 123"
-            : draft.format.sample
-        let previewText = primary +
-            "　这是一段用于观察自动换行、首行或悬挂缩进的示意文字。\n" +
-            "下一段用于比较段前、段后与行距设置。"
+        let eastAsiaText = "中文标题与正文格式示意。这是一段用于观察自动换行和缩进的文字。"
+        let latinText = "English typography preview Aa 123. Compare spacing and line height."
+        let previewText = eastAsiaText + "\n" + latinText
         let color = draft.effectiveColorHex.flatMap(nsColorFromHex) ?? NSColor.labelColor
-        textView.textStorage?.setAttributedString(
-            NSAttributedString(
-                string: previewText,
-                attributes: [
-                    .font: font,
-                    .foregroundColor: color,
-                    .paragraphStyle: paragraphStyle
-                ]
+        let attributed = NSMutableAttributedString(
+            string: previewText,
+            attributes: [
+                .foregroundColor: color,
+                .paragraphStyle: paragraphStyle
+            ]
+        )
+        attributed.addAttribute(
+            .font,
+            value: eastAsiaFont,
+            range: NSRange(location: 0, length: (eastAsiaText as NSString).length)
+        )
+        let latinLocation = (eastAsiaText as NSString).length + 1
+        attributed.addAttribute(
+            .font,
+            value: latinFont,
+            range: NSRange(
+                location: latinLocation,
+                length: (latinText as NSString).length
             )
         )
+        textView.textStorage?.setAttributedString(attributed)
+    }
+
+    private func previewFont(
+        requestedName: String?,
+        aliases: [String],
+        size: Double
+    ) -> NSFont {
+        let match = installedFontCatalog.match(name: requestedName, aliases: aliases)
+        var font = match.postScriptName.flatMap {
+            NSFont(name: $0, size: CGFloat(size))
+        } ?? NSFont.systemFont(ofSize: CGFloat(size))
+        if draft.effectiveBold == true {
+            font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+        }
+        if draft.format.italic == true {
+            font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+        }
+        return font
     }
 
     private func previewIndentPoints(

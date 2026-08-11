@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import tempfile
+import unicodedata
 import uuid
 import zipfile
 from collections import Counter
@@ -37,6 +38,7 @@ MAX_PACK_MEMBERS = 256
 MAX_PACK_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_PACK_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_EDITS_JSON_BYTES = 1024 * 1024
+MAX_FONT_ALIASES_PER_FORMAT = 64
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 A = {"a": A_NS}
 
@@ -104,6 +106,52 @@ def _style_chain(
     return chain
 
 
+def _east_asian_theme_script(language: Optional[str]) -> Optional[str]:
+    """Map a themeFontLang BCP-47 value to a DrawingML script tag."""
+    if not language:
+        return None
+    subtags = [
+        value.casefold()
+        for value in language.replace("_", "-").split("-")
+        if value
+    ]
+    if not subtags:
+        return None
+    primary = subtags[0]
+    if primary == "ja":
+        return "Jpan"
+    if primary == "ko":
+        return "Hang"
+    if primary != "zh":
+        return None
+    if "hant" in subtags or any(
+        region in subtags for region in ("tw", "hk", "mo")
+    ):
+        return "Hant"
+    if "hans" in subtags or any(
+        region in subtags for region in ("cn", "sg")
+    ):
+        return "Hans"
+    # Word's unqualified zh theme language conventionally denotes simplified
+    # Chinese.  Keeping that deterministic is preferable to using the Mac UI
+    # locale, which would make a saved format pack machine-dependent.
+    return "Hans"
+
+
+def _theme_font_language(entries: Dict[str, bytes]) -> Optional[str]:
+    settings = entries.get("word/settings.xml")
+    if settings is None:
+        return None
+    root = core.parse_xml(settings, "settings.xml")
+    node = root.find("w:themeFontLang", namespaces=core.NS)
+    if node is None:
+        return None
+    return (
+        node.get(core.qn(core.W_NS, "eastAsia"))
+        or node.get(core.qn(core.W_NS, "val"))
+    )
+
+
 def _theme_metadata(entries: Dict[str, bytes]) -> Dict[str, Dict[str, str]]:
     _, roles = core.collect_format_relationships(entries)
     theme_record = roles.get("theme")
@@ -121,6 +169,9 @@ def _theme_metadata(entries: Dict[str, bytes]) -> Dict[str, Dict[str, str]]:
     fonts: Dict[str, str] = {}
     colors: Dict[str, str] = {}
 
+    east_asian_script = _east_asian_theme_script(
+        _theme_font_language(entries)
+    )
     for group_name, group_tag in (("major", "majorFont"), ("minor", "minorFont")):
         group = root.find(
             ".//a:themeElements/a:fontScheme/a:%s" % group_tag,
@@ -132,17 +183,25 @@ def _theme_metadata(entries: Dict[str, bytes]) -> Dict[str, Dict[str, str]]:
         east_asian = group.find("a:ea", namespaces=A)
         latin_name = latin.get("typeface", "") if latin is not None else ""
         east_name = east_asian.get("typeface", "") if east_asian is not None else ""
-        hans = ""
-        hant = ""
+        supplemental_fonts: Dict[str, str] = {}
         for supplemental in group.findall("a:font", namespaces=A):
             script = supplemental.get("script", "")
-            if script == "Hans":
-                hans = supplemental.get("typeface", "")
-            elif script == "Hant":
-                hant = supplemental.get("typeface", "")
+            typeface = supplemental.get("typeface", "")
+            if script and typeface:
+                supplemental_fonts[script] = typeface
         fonts["%sHAnsi" % group_name] = latin_name
         fonts["%sAscii" % group_name] = latin_name
-        fonts["%sEastAsia" % group_name] = hans or hant or east_name or latin_name
+        east_asian_name = (
+            supplemental_fonts.get(east_asian_script or "", "")
+            or east_name
+            # Preserve the historical deterministic fallback for old packs
+            # whose settings omit themeFontLang, while preferring an explicit
+            # language-specific supplemental face whenever one is available.
+            or supplemental_fonts.get("Hans", "")
+            or supplemental_fonts.get("Hant", "")
+            or latin_name
+        )
+        fonts["%sEastAsia" % group_name] = east_asian_name
 
     scheme = root.find(".//a:themeElements/a:clrScheme", namespaces=A)
     if scheme is not None:
@@ -159,6 +218,149 @@ def _theme_metadata(entries: Dict[str, bytes]) -> Dict[str, Dict[str, str]]:
             if safe:
                 colors[name] = safe
     return {"fonts": fonts, "colors": colors}
+
+
+def _font_alias_key(value: str) -> str:
+    return unicodedata.normalize("NFKC", value.strip()).casefold()
+
+
+def _font_aliases(entries: Dict[str, bytes]) -> Dict[str, List[str]]:
+    """Return a case-insensitive, bidirectional fontTable alias index."""
+    _rels, roles = core.collect_format_relationships(entries)
+    record = roles.get("fontTable")
+    part_name = (
+        record[0]
+        if record is not None
+        else core.ROLE_FALLBACK_PARTS["fontTable"]
+    )
+    if part_name not in entries:
+        return {}
+    root = core.parse_xml(entries[part_name], part_name)
+
+    # Font-table records can overlap (an alternate name in one record can be
+    # the primary name in another), so build connected components instead of
+    # a one-way primary-name dictionary.
+    graph: Dict[str, Set[str]] = {}
+    display_names: Dict[str, str] = {}
+
+    def add_name(raw: Optional[str]) -> Optional[str]:
+        if raw is None:
+            return None
+        name = raw.strip()
+        if (
+            not name
+            or len(name) > 1024
+            or any(ord(character) < 32 or ord(character) == 127 for character in name)
+        ):
+            return None
+        key = _font_alias_key(name)
+        graph.setdefault(key, set())
+        display_names.setdefault(key, name)
+        return key
+
+    for font in root.findall("w:font", namespaces=core.NS):
+        primary_key = add_name(font.get(core.qn(core.W_NS, "name")))
+        if primary_key is None:
+            continue
+        alternate = font.find("w:altName", namespaces=core.NS)
+        raw_alternate = (
+            alternate.get(core.qn(core.W_NS, "val"))
+            if alternate is not None
+            else None
+        )
+        alias_key = add_name(raw_alternate)
+        if alias_key is None or alias_key == primary_key:
+            continue
+        graph[primary_key].add(alias_key)
+        graph[alias_key].add(primary_key)
+
+    result: Dict[str, List[str]] = {}
+    visited: Set[str] = set()
+    for start in graph:
+        if start in visited:
+            continue
+        stack = [start]
+        component: List[str] = []
+        visited.add(start)
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbor in graph[current]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    stack.append(neighbor)
+        if len(component) < 2:
+            continue
+        ordered = sorted(
+            component,
+            key=lambda key: (display_names[key].casefold(), display_names[key]),
+        )
+        for key in ordered:
+            result[key] = [
+                display_names[other]
+                for other in ordered
+                if other != key
+            ][:MAX_FONT_ALIASES_PER_FORMAT]
+    return result
+
+
+def _effective_style_fonts(
+    style_id: str,
+    catalog: core.StyleCatalog,
+    styles_root: etree._Element,
+    theme: Dict[str, Dict[str, str]],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve fonts level-by-level without leaking lower-level theme refs."""
+    style_nodes = {
+        node.get(core.qn(core.W_NS, "styleId")): node
+        for node in styles_root.findall("w:style", namespaces=core.NS)
+        if node.get(core.qn(core.W_NS, "styleId"))
+    }
+    run_property_levels: List[Optional[etree._Element]] = [
+        styles_root.find(
+            "w:docDefaults/w:rPrDefault/w:rPr", namespaces=core.NS
+        )
+    ]
+    run_property_levels.extend(
+        style_nodes[chain_item.style_id].find("w:rPr", namespaces=core.NS)
+        for chain_item in _style_chain(style_id, catalog)
+        if chain_item.style_id in style_nodes
+    )
+
+    font_latin: Optional[str] = None
+    font_east_asia: Optional[str] = None
+    theme_fonts = theme.get("fonts", {})
+    for run_properties in run_property_levels:
+        if run_properties is None:
+            continue
+        rfonts = run_properties.find("w:rFonts", namespaces=core.NS)
+        if rfonts is None:
+            continue
+
+        explicit_latin = (
+            rfonts.get(core.qn(core.W_NS, "ascii"))
+            or rfonts.get(core.qn(core.W_NS, "hAnsi"))
+        )
+        latin_theme_key = (
+            rfonts.get(core.qn(core.W_NS, "asciiTheme"))
+            or rfonts.get(core.qn(core.W_NS, "hAnsiTheme"))
+        )
+        if latin_theme_key is not None:
+            font_latin = theme_fonts.get(latin_theme_key) or explicit_latin
+        elif explicit_latin is not None:
+            font_latin = explicit_latin
+
+        explicit_east_asia = rfonts.get(core.qn(core.W_NS, "eastAsia"))
+        east_asia_theme_key = rfonts.get(
+            core.qn(core.W_NS, "eastAsiaTheme")
+        )
+        if east_asia_theme_key is not None:
+            font_east_asia = (
+                theme_fonts.get(east_asia_theme_key) or explicit_east_asia
+            )
+        elif explicit_east_asia is not None:
+            font_east_asia = explicit_east_asia
+    return font_latin, font_east_asia
 
 
 def _merge_property_children(
@@ -232,6 +434,7 @@ def _style_preview(
     catalog: core.StyleCatalog,
     styles_root: etree._Element,
     theme: Dict[str, Dict[str, str]],
+    font_aliases: Optional[Dict[str, List[str]]] = None,
     numbering_rule: Optional[core.HeadingNumberingRule] = None,
     inferred: bool = False,
     inference_label: Optional[str] = None,
@@ -327,24 +530,9 @@ def _style_preview(
                 if table_accent:
                     break
 
-    rfonts = run_properties.get("rFonts")
-    font_latin: Optional[str] = None
-    font_east_asia: Optional[str] = None
-    if rfonts is not None:
-        font_latin = (
-            rfonts.get(core.qn(core.W_NS, "ascii"))
-            or rfonts.get(core.qn(core.W_NS, "hAnsi"))
-        )
-        font_east_asia = rfonts.get(core.qn(core.W_NS, "eastAsia"))
-        if not font_latin:
-            theme_key = (
-                rfonts.get(core.qn(core.W_NS, "asciiTheme"))
-                or rfonts.get(core.qn(core.W_NS, "hAnsiTheme"))
-            )
-            font_latin = theme.get("fonts", {}).get(theme_key or "") or theme_key
-        if not font_east_asia:
-            theme_key = rfonts.get(core.qn(core.W_NS, "eastAsiaTheme"))
-            font_east_asia = theme.get("fonts", {}).get(theme_key or "") or theme_key
+    font_latin, font_east_asia = _effective_style_fonts(
+        style_id, catalog, styles_root, theme
+    )
 
     size_pt: Optional[float] = None
     size_node = run_properties.get("sz")
@@ -446,7 +634,7 @@ def _style_preview(
     outline_level = catalog.resolved_outline.get(style_id)
     numbering_example = _numbering_example(numbering_rule)
 
-    return {
+    preview: Dict[str, object] = {
         "style_id": style_id,
         "name": name,
         "type": style_type,
@@ -493,6 +681,18 @@ def _style_preview(
         "table_fill_hex": table_fill,
         "table_accent_hex": table_accent,
     }
+    aliases = font_aliases or {}
+    if font_latin:
+        latin_aliases = aliases.get(_font_alias_key(font_latin), [])
+        if latin_aliases:
+            preview["font_latin_aliases"] = list(latin_aliases)
+    if font_east_asia:
+        east_asia_aliases = aliases.get(
+            _font_alias_key(font_east_asia), []
+        )
+        if east_asia_aliases:
+            preview["font_east_asia_aliases"] = list(east_asia_aliases)
+    return preview
 
 
 def _story_name(part_name: str) -> str:
@@ -589,6 +789,7 @@ def inspect_source(
     )
     styles_root = core.parse_xml(entries["word/styles.xml"], "styles.xml")
     theme = _theme_metadata(entries)
+    font_aliases = _font_aliases(entries)
 
     paragraph_usage: Counter[str] = Counter()
     character_usage: Counter[str] = Counter()
@@ -744,7 +945,8 @@ def inspect_source(
                     catalog,
                     styles_root,
                     theme,
-                    heading_numbering.get(style_id),
+                    font_aliases=font_aliases,
+                    numbering_rule=heading_numbering.get(style_id),
                     paragraph_override=heading_paragraph_properties.get(
                         style_id
                     ),
@@ -761,7 +963,8 @@ def inspect_source(
                 catalog,
                 styles_root,
                 theme,
-                heading_numbering.get(style_id),
+                font_aliases=font_aliases,
+                numbering_rule=heading_numbering.get(style_id),
                 inferred=True,
                 inference_label="智能补全",
                 paragraph_override=heading_paragraph_properties.get(style_id),
@@ -810,6 +1013,7 @@ def inspect_source(
                 catalog,
                 styles_root,
                 theme,
+                font_aliases=font_aliases,
                 inferred=True,
                 inference_label="可选表格方案",
             )
@@ -1274,6 +1478,22 @@ def _validate_used_format_record(
                 value, "%s.%s" % (field, key), maximum=1024,
                 allow_empty=True,
             )
+    for key, font_key in (
+        ("font_latin_aliases", "font_latin"),
+        ("font_east_asia_aliases", "font_east_asia"),
+    ):
+        if key not in raw:
+            continue
+        aliases = raw[key]
+        _validate_font_alias_list(aliases, "%s.%s" % (field, key))
+        effective_font = raw.get(font_key)
+        if isinstance(effective_font, str) and any(
+            _font_alias_key(alias) == _font_alias_key(effective_font)
+            for alias in aliases
+        ):
+            raise core.TransferError(
+                "格式库字段 %s.%s 不能重复主字体名称。" % (field, key)
+            )
     for key in (
         "size_pt",
         "space_before_pt",
@@ -1322,6 +1542,25 @@ def _validate_string_list(value: object, field: str) -> None:
             item, "%s[%d]" % (field, index), maximum=1024,
             allow_empty=True,
         )
+
+
+def _validate_font_alias_list(value: object, field: str) -> None:
+    if not isinstance(value, list):
+        raise core.TransferError("格式库字段 %s 必须是文本数组。" % field)
+    if len(value) > MAX_FONT_ALIASES_PER_FORMAT:
+        raise core.TransferError(
+            "格式库字段 %s 最多包含 %d 个字体别名。"
+            % (field, MAX_FONT_ALIASES_PER_FORMAT)
+        )
+    seen: Set[str] = set()
+    for index, item in enumerate(value):
+        alias = _manifest_string(
+            item, "%s[%d]" % (field, index), maximum=1024
+        )
+        key = _font_alias_key(alias)
+        if key in seen:
+            raise core.TransferError("格式库字段 %s 包含重复字体别名。" % field)
+        seen.add(key)
 
 
 def _validate_count_object(
@@ -1652,6 +1891,7 @@ def load_style_pack(pack_path: Path) -> Tuple[Dict[str, object], Dict[str, bytes
         raise core.TransferError("格式库部件数量与清单不一致。")
     manifest = dict(manifest)
     manifest["pack_path"] = str(pack_path)
+    _synthesize_legacy_font_aliases(manifest, entries)
     _synthesize_legacy_table_edit_candidate(manifest, entries)
     return manifest, entries
 
@@ -2510,6 +2750,7 @@ def _refresh_used_format_previews(
     )
     styles_root = core.parse_xml(runtime_entries["word/styles.xml"], "styles.xml")
     theme = _theme_metadata(runtime_entries)
+    font_aliases = _font_aliases(runtime_entries)
     numbering = core.heading_numbering_from_manifest(
         manifest.get("heading_numbering"), runtime_entries, catalog
     )
@@ -2559,7 +2800,8 @@ def _refresh_used_format_previews(
             catalog,
             styles_root,
             theme,
-            numbering.get(style_id),
+            font_aliases=font_aliases,
+            numbering_rule=numbering.get(style_id),
             inferred=inferred,
             inference_label=(
                 "自定义表格方案"
@@ -2649,6 +2891,7 @@ def _refreshed_table_candidate_preview(
         catalog,
         styles_root,
         _theme_metadata(entries),
+        font_aliases=_font_aliases(entries),
         inferred=inferred,
         inference_label=label,
     )
@@ -2700,6 +2943,45 @@ def _synthesize_legacy_table_edit_candidate(
         inferred=True,
         label="可选表格方案",
     )
+
+
+def _synthesize_legacy_font_aliases(
+    manifest: Dict[str, object], entries: Dict[str, bytes]
+) -> None:
+    """Enrich old packs with fontTable aliases in memory only.
+
+    Packs created before the alias preview fields were introduced already
+    retain the allow-listed fontTable part.  Reusing it here gives those packs
+    the same cross-locale font discovery as newly imported templates without
+    modifying the archive or invalidating its integrity metadata.
+    """
+    aliases = _font_aliases(entries)
+    if not aliases:
+        return
+
+    records: List[object] = []
+    used_formats = manifest.get("used_formats")
+    if isinstance(used_formats, list):
+        records.extend(used_formats)
+    candidate = manifest.get("table_style_edit_candidate")
+    if candidate is not None:
+        records.append(candidate)
+
+    for raw in records:
+        if not isinstance(raw, dict):
+            continue
+        for font_field, alias_field in (
+            ("font_latin", "font_latin_aliases"),
+            ("font_east_asia", "font_east_asia_aliases"),
+        ):
+            if alias_field in raw:
+                continue
+            font_name = raw.get(font_field)
+            if not isinstance(font_name, str) or not font_name.strip():
+                continue
+            values = aliases.get(_font_alias_key(font_name), [])
+            if values:
+                raw[alias_field] = list(values)
 
 
 def derive_style_pack(

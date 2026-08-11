@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 private enum DeletionTestFailure: LocalizedError {
@@ -141,12 +142,15 @@ struct PackDeletionPolicyTests {
         try require(fileManager.fileExists(atPath: trashableURL.path), "废纸篓文件应可恢复")
 
         try runParagraphEditorTests()
+        try runFontCatalogTests()
 
-        print("PackDeletionPolicyTests: deletion and paragraph editor checks passed")
+        print("PackDeletionPolicyTests: deletion, paragraph editor, and font catalog checks passed")
     }
 
     private static func runParagraphEditorTests() throws {
         let legacy = try makeUsedFormat()
+        try require(legacy.fontLatinAliases == nil, "旧格式 JSON 缺少西文字体别名时应解码为 nil")
+        try require(legacy.fontEastAsiaAliases == nil, "旧格式 JSON 缺少中文字体别名时应解码为 nil")
         try require(legacy.leftIndentChars == nil, "旧格式 JSON 缺少字符缩进时应解码为 nil")
         try require(legacy.leftIndentPt == nil, "旧格式 JSON 缺少磅缩进时应解码为 nil")
         try require(legacy.alignment == nil, "旧格式 JSON 缺少对齐时应继续兼容")
@@ -271,6 +275,142 @@ struct PackDeletionPolicyTests {
         try require(!edited.hasUserInput, "重置后不应保留段落输入或选择")
         try require(edited.payload == nil, "重置后不应产生修改请求")
         try require(edited.indentUnit == .characters, "重置后应恢复原格式首选缩进单位")
+    }
+
+    private static func runFontCatalogTests() throws {
+        let records = [
+            InstalledFontFaceRecord(
+                familyName: "Times New Roman",
+                localizedFamilyName: "泰晤士新罗马",
+                postScriptName: "TimesNewRomanPSMT",
+                displayName: "Times New Roman Regular",
+                faceName: "Regular"
+            ),
+            InstalledFontFaceRecord(
+                familyName: "Times New Roman",
+                localizedFamilyName: "泰晤士新罗马",
+                postScriptName: "TimesNewRomanPS-BoldMT",
+                displayName: "Times New Roman Bold",
+                faceName: "Bold",
+                weight: 9,
+                traitsRawValue: NSFontTraitMask.boldFontMask.rawValue
+            ),
+            InstalledFontFaceRecord(
+                familyName: "Songti SC",
+                localizedFamilyName: "宋体-简",
+                postScriptName: "STSongti-SC-Regular",
+                displayName: "Songti SC Regular",
+                faceName: "Regular"
+            ),
+            InstalledFontFaceRecord(
+                familyName: "Conflict One",
+                postScriptName: "ConflictOne-Regular",
+                displayName: "Shared Alias"
+            ),
+            InstalledFontFaceRecord(
+                familyName: "Conflict Two",
+                postScriptName: "ConflictTwo-Regular",
+                displayName: "Shared-Alias"
+            )
+        ]
+        let catalog = InstalledFontCatalog(records: records)
+
+        let familyMatch = catalog.match(name: "Times New Roman")
+        try require(familyMatch.kind == .installed, "字体 family 原名应识别为已安装")
+        try require(
+            familyMatch.postScriptName == "TimesNewRomanPSMT",
+            "family 预览应选常规 PostScript 字体"
+        )
+
+        let postScriptMatch = catalog.match(name: "TimesNewRomanPS-BoldMT")
+        try require(postScriptMatch.kind == .installed, "PostScript 原名应识别为已安装")
+        try require(
+            postScriptMatch.postScriptName == "TimesNewRomanPS-BoldMT",
+            "精确 PostScript 查询应保留对应字形"
+        )
+
+        let localizedMatch = catalog.match(name: "宋体-简")
+        try require(localizedMatch.kind == .alias, "本地化名称应通过别名匹配")
+        try require(
+            localizedMatch.canonicalFamilyName == "Songti SC",
+            "本地化名称应解析到规范 family 名"
+        )
+
+        let compactMatch = catalog.match(name: "TimesNewRoman")
+        try require(
+            compactMatch.canonicalFamilyName == "Times New Roman",
+            "忽略空格的查询应匹配字体 family"
+        )
+        try require(
+            catalog.search("STSongti").map(\.canonicalFamilyName) == ["Songti SC"],
+            "搜索应匹配 PostScript 名"
+        )
+        try require(
+            catalog.search("宋体").map(\.canonicalFamilyName) == ["Songti SC"],
+            "搜索应匹配本地化名称"
+        )
+
+        let exactDisplayAlias = catalog.match(name: "Shared Alias")
+        try require(
+            exactDisplayAlias.kind == .alias &&
+                exactDisplayAlias.canonicalFamilyName == "Conflict One",
+            "唯一的精确 display 名应优先于宽松规范化结果"
+        )
+
+        let ambiguous = catalog.match(name: "SharedAlias")
+        try require(ambiguous.kind == .ambiguous, "冲突别名不得静默选择字体")
+        try require(
+            ambiguous.candidateFamilyNames == ["Conflict One", "Conflict Two"],
+            "冲突结果应列出全部候选 family"
+        )
+
+        let exactWithConflictingAliases = catalog.match(
+            name: "Times New Roman",
+            aliases: ["SharedAlias"]
+        )
+        try require(
+            exactWithConflictingAliases.kind == .installed &&
+                exactWithConflictingAliases.canonicalFamilyName == "Times New Roman",
+            "原名唯一命中时，冲突的文档别名不得覆盖精确结果"
+        )
+
+        let templateAliasMatch = catalog.match(
+            name: "Template Song Font",
+            aliases: ["宋体-简"]
+        )
+        try require(
+            templateAliasMatch.kind == .alias &&
+                templateAliasMatch.canonicalFamilyName == "Songti SC",
+            "未注册模板原名应允许通过文档别名解析"
+        )
+        try require(
+            catalog.match(name: "SimSun").kind == .missing,
+            "本机没有的模板字体必须保持未注册状态"
+        )
+
+        let first = try makeUsedFormat(overrides: [
+            "font_latin": "TimesNewRomanPSMT",
+            "font_latin_aliases": ["Times New Roman", "泰晤士新罗马"],
+            "font_east_asia": "Template Song Font",
+            "font_east_asia_aliases": ["宋体-简"]
+        ])
+        let second = try makeUsedFormat(overrides: [
+            "style_id": "Heading2",
+            "font_latin": "TimesNewRomanPSMT",
+            "font_latin_aliases": ["Times New Roman"],
+            "font_east_asia": "SimSun"
+        ])
+        let latinOptions = templateFontOptions(from: [first, second], role: .latin)
+        try require(latinOptions.count == 1, "整份模板的重复字体应合并为一个选项")
+        try require(
+            Set(latinOptions[0].aliases) == Set(["Times New Roman", "泰晤士新罗马"]),
+            "合并模板字体时应保留全部别名"
+        )
+        let eastAsiaOptions = templateFontOptions(from: [first, second], role: .eastAsia)
+        try require(
+            eastAsiaOptions.map(\.name) == ["SimSun", "Template Song Font"],
+            "模板字体目录应包含整份模板使用过且本机可能未安装的字体"
+        )
     }
 
     private static func makePack(id: String, path: String) throws -> PackManifest {
