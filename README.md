@@ -2,7 +2,9 @@
 
 > 一份范本，万卷同式。
 
-Forma 赋式把一个 Word 文档的标题、正文、标题多级编号、表格、主题和页面设置保存成可复用的“格式方案”，以后可以直接套用到其他 Word 文档，不必反复选择原格式源。项目同时提供 Mac 与 Windows 桌面版，两端使用相同的 `.wfstyle` 格式方案。
+Forma 赋式把一个 Word 文档的标题、正文、标题多级编号、表格、主题和页面设置保存成可复用的“格式方案”，以后可以直接套用到其他 Word 文档，不必反复选择原格式源。
+
+项目同时提供 Mac 与 Windows 桌面版：两端使用相同的 `.wfstyle` 格式方案、相同的操作流程与界面文案，视觉上各自保留平台惯例——Mac 是 SwiftUI，Windows 是 WinForms。
 
 ## 可用版本
 
@@ -17,7 +19,7 @@ Forma 赋式把一个 Word 文档的标题、正文、标题多级编号、表�
 
 程序始终生成新文件，不会改写格式源或目标原文件。格式源在导入后可以移动或删除，已保存的格式方案仍可使用。
 
-在“我的格式库”中，每套格式右侧都有独立的删除按钮。确认后程序只会把对应的 `.wfstyle` 格式方案移到 macOS 废纸篓，不会删除原来的样板 Word 文件、目标文件或已经生成的文档；误删时可以从废纸篓恢复。
+“我的格式库”是一条常驻侧边栏，三个步骤中始终可见，随时可以换用另一套格式，不必退回第一步。每套格式右侧都有独立的删除按钮。确认后程序只会把对应的 `.wfstyle` 格式方案移到 macOS 废纸篓或 Windows 回收站，不会删除原来的样板 Word 文件、目标文件或已经生成的文档；误删时可以恢复。
 
 ## 格式预览里会看到什么
 
@@ -43,11 +45,13 @@ Forma 赋式把一个 Word 文档的标题、正文、标题多级编号、表�
 
 ```text
 # macOS
-~/Library/Application Support/WordFormatMigrator/style-packs/
+~/Library/Application Support/FormaFushi/style-packs/
 
 # Windows
 %LOCALAPPDATA%\FormaFushi\style-packs\
 ```
+
+2.6.0 之前的 macOS 版本用的是 `WordFormatMigrator` 目录。新版本首次启动时会整体迁移到 `FormaFushi`，并在新目录里留下一个 `.migrated-from-WordFormatMigrator` 标记文件；迁移失败时会继续使用旧目录，不会丢失已保存的格式。
 
 每个 `.wfstyle` 文件只包含经过白名单处理的格式 XML 和预览索引：样式、主题颜色、字体映射、编号规则、部分格式设置与页面布局。它不会保存源文档正文、页眉页脚文字、批注、图片、宏、嵌入对象或嵌入字体；预览中的文字是程序生成的示例，不是源文档摘录。
 
@@ -104,6 +108,13 @@ python3 style_pack_manager.py create-pack \
   --out 我的格式.wfstyle \
   --name 我的格式
 
+# 也可以只给格式库目录，由引擎决定文件名并在 JSON 里回传；
+# 两端客户端走的就是这条路径，因此文件命名规则只有一份。
+python3 style_pack_manager.py create-pack \
+  --source 格式源.docx \
+  --dir ~/Library/Application\ Support/FormaFushi/style-packs \
+  --name 我的格式
+
 python3 style_pack_manager.py apply-pack \
   --pack 我的格式.wfstyle \
   --target 内容目标.docx \
@@ -127,16 +138,37 @@ pip install -r requirements-dev.txt
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-运行 Mac 客户端的格式库删除策略测试：
+运行 Mac 客户端的行为测试。`PackDeletionPolicyTests` 覆盖格式库删除策略，`LibraryLocationTests` 覆盖格式库目录的解析与旧目录迁移；每个套件自带 `@main`，需要各编各的可执行文件：
 
 ```bash
-xcrun swiftc -parse-as-library -D WORD_FORMAT_LIBRARY_TESTING \
-  swift-app/WordFormatLibraryApp.swift tests/PackDeletionPolicyTests.swift \
-  -o build/PackDeletionPolicyTests
-./build/PackDeletionPolicyTests
+for suite in PackDeletionPolicyTests LibraryLocationTests; do
+  xcrun swiftc -parse-as-library -D WORD_FORMAT_LIBRARY_TESTING \
+    $(find swift-app -name '*.swift' | sort) "tests/$suite.swift" \
+    -o "build/$suite"
+  "./build/$suite"
+done
 ```
 
+Windows 侧的 `PackDeletionPolicy` 有一份等价实现，对应测试必须在 Windows 上运行（涉及回收站与符号链接）：
+
+```powershell
+dotnet run --project tests\WindowsPackDeletionPolicyTests\WindowsPackDeletionPolicyTests.csproj -c Release -- --strict
+```
+
+`--strict` 表示不允许因为环境不支持而跳过任何一项，CI 上使用这个开关。
+
 上述检查以及两端客户端的编译由 `.github/workflows/ci.yml` 在每次 push 和 PR 时自动执行。
+
+### 界面文案的单一来源
+
+两端的全部中文界面文案集中在 `shared/ui-strings.json`，由 `scripts/gen_ui_strings.py` 生成两端的强类型常量：
+
+```bash
+python3 scripts/gen_ui_strings.py            # 改完 JSON 后重新生成
+python3 scripts/gen_ui_strings.py --check    # 校验生成物是否与 JSON 同步
+```
+
+生成物是 `swift-app/Generated/UIStrings.swift` 和 `windows-app/FormaFushi.Windows/Generated/UIStrings.g.cs`，不要手工编辑；CI 会校验它们与 JSON 一致。选代码生成而不是运行时读 JSON，是为了让写错的 key 在编译期就报错，而不是变成线上界面里的一块空白。
 
 在 Mac 上构建同时支持 Apple Silicon 与 Intel 的签名应用和压缩包：
 
@@ -150,7 +182,9 @@ xcrun swiftc -parse-as-library -D WORD_FORMAT_LIBRARY_TESTING \
 ./scripts/build_windows_app.sh
 ```
 
-Windows 构建脚本会校验并组装固定版本的 .NET、Windows Embeddable Python 与 `lxml`，生成 UTF-8 文件名兼容的 ZIP 和 SHA-256。构建结果写入本机 `build/` 和 `outputs/`，不应提交到 Git。Mac 应用内部继续使用原有 bundle ID 和数据目录；两个平台继续使用相同的 `.wfstyle` 结构。
+Windows 构建脚本会校验并组装固定版本的 .NET、Windows Embeddable Python 与 `lxml`，生成 UTF-8 文件名兼容的 ZIP 和 SHA-256。构建结果写入本机 `build/` 和 `outputs/`，不应提交到 Git。
+
+两个脚本都从工程文件读版本号，不再各自硬编码：macOS 读 `swift-app/Info.plist`，Windows 读 `FormaFushi.Windows.csproj` 的 `<Version>`。Mac 应用内部继续使用原有 bundle ID；两个平台使用相同的 `.wfstyle` 结构和相同的格式库目录名。
 
 ## 许可证
 

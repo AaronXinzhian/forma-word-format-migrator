@@ -11,6 +11,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  shared-strings:
+    name: 界面文案单一来源同步性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # 生成物一旦被手工改过，这里就会红，避免有人绕开 shared/ui-strings.json 直接改两端常量。
+      - name: 校验生成的 UIStrings 与 shared/ui-strings.json 同步
+        run: python3 scripts/gen_ui_strings.py --check
+
   python-tests:
     name: 文档引擎回归 (${{ matrix.os }} / Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
@@ -49,23 +63,31 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_*.py' -v
 
   swift-checks:
-    name: Mac 客户端编译与删除策略测试
+    name: Mac 客户端编译与行为测试
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 编译并运行 PackDeletionPolicyTests
+      - name: 收集 Swift 源文件
+        id: sources
+        run: |
+          echo "list=$(find swift-app -name '*.swift' | sort | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+      # 每个测试自带 @main，只能各编各的可执行文件。
+      - name: 编译并运行 Swift 行为测试
         run: |
           mkdir -p build/ci
-          xcrun swiftc \
-            -parse-as-library \
-            -D WORD_FORMAT_LIBRARY_TESTING \
-            -target arm64-apple-macos13.0 \
-            -module-cache-path build/ci/module-cache-tests \
-            swift-app/WordFormatLibraryApp.swift \
-            tests/PackDeletionPolicyTests.swift \
-            -o build/ci/PackDeletionPolicyTests
-          ./build/ci/PackDeletionPolicyTests
+          for suite in PackDeletionPolicyTests LibraryLocationTests; do
+            xcrun swiftc \
+              -parse-as-library \
+              -D WORD_FORMAT_LIBRARY_TESTING \
+              -target arm64-apple-macos13.0 \
+              -module-cache-path "build/ci/module-cache-${suite}" \
+              ${{ steps.sources.outputs.list }} \
+              "tests/${suite}.swift" \
+              -o "build/ci/${suite}"
+            "./build/ci/${suite}"
+          done
 
       - name: 交叉架构编译检查（Release 构型）
         run: |
@@ -75,12 +97,12 @@ jobs:
               -parse-as-library \
               -target "$target" \
               -module-cache-path "build/ci/module-cache-${target}" \
-              swift-app/WordFormatLibraryApp.swift \
+              ${{ steps.sources.outputs.list }} \
               -o "build/ci/WordFormatLibrary-${target}"
           done
 
   windows-build:
-    name: Windows 客户端编译
+    name: Windows 客户端编译与删除策略测试
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -91,6 +113,11 @@ jobs:
 
       - name: 编译 WinForms 客户端
         run: dotnet build windows-app/FormaFushi.Windows/FormaFushi.Windows.csproj -c Release
+
+      # 与 macOS 侧 tests/PackDeletionPolicyTests.swift 的 12 项检查一一对应。
+      # --strict 禁止「本机不支持所以跳过」，CI 上符号链接与回收站都必须真的跑过。
+      - name: 运行 WindowsPackDeletionPolicyTests
+        run: dotnet run --project tests/WindowsPackDeletionPolicyTests/WindowsPackDeletionPolicyTests.csproj -c Release -- --strict
 
       # 冒烟工具需要打包后的 runtime/ resources/ smoke-fixtures/ 布局才能运行，
       # CI 里只做编译检查，实际执行仍依赖 scripts/build_windows_app.sh 的产物。

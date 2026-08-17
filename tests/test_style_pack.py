@@ -366,5 +366,55 @@ class StylePackTests(unittest.TestCase):
             manager.load_style_pack(unsupported)
 
 
+class PackNamingTests(unittest.TestCase):
+    """格式包文件名由引擎统一决定，两端客户端不再各自拼接。
+
+    这些断言是 Mac 与 Windows 共用的命名契约：任何一条被改动，
+    两端格式库目录里的文件名就会开始分叉。
+    """
+
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory(prefix="pack-naming-tests-")
+        self.library_dir = Path(self._temporary.name)
+        self.addCleanup(self._temporary.cleanup)
+
+    def test_stem_keeps_alphanumerics_and_collapses_separators(self) -> None:
+        self.assertEqual(manager.pack_file_stem("公司 公文 模板"), "公司-公文-模板")
+        self.assertEqual(manager.pack_file_stem("a//b\\\\c"), "a-b-c")
+        self.assertEqual(manager.pack_file_stem("keep_this-one"), "keep_this-one")
+
+    def test_stem_strips_edges_and_falls_back(self) -> None:
+        self.assertEqual(manager.pack_file_stem("  报告 "), "报告")
+        self.assertEqual(manager.pack_file_stem("///"), "word-format")
+        self.assertEqual(manager.pack_file_stem(None), "word-format")
+        self.assertEqual(manager.pack_file_stem(""), "word-format")
+
+    def test_stem_is_bounded(self) -> None:
+        self.assertEqual(len(manager.pack_file_stem("名" * 200)), 48)
+
+    def test_allocated_paths_are_unique_and_inside_library(self) -> None:
+        first = manager.allocate_pack_path(self.library_dir, "报告模板")
+        first.write_bytes(b"placeholder")
+        second = manager.allocate_pack_path(self.library_dir, "报告模板")
+
+        self.assertNotEqual(first, second)
+        for path in (first, second):
+            self.assertEqual(path.parent, self.library_dir.resolve())
+            self.assertEqual(path.suffix, manager.PACK_SUFFIX)
+            self.assertTrue(path.name.startswith("报告模板-"))
+
+    def test_create_pack_with_dir_names_the_file_itself(self) -> None:
+        source = self.library_dir.parent / "naming-source.docx"
+        shutil.copy2(FIXTURES / "source.docx", source)
+        self.addCleanup(source.unlink)
+
+        destination = manager.allocate_pack_path(self.library_dir, "公司 公文")
+        manifest = manager.create_style_pack(source, destination, display_name="公司 公文")
+
+        self.assertTrue(destination.exists())
+        self.assertTrue(destination.name.startswith("公司-公文-"))
+        self.assertEqual(manifest["pack_path"], str(destination))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

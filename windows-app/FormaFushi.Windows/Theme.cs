@@ -16,6 +16,7 @@ internal static class Theme
     public static readonly Color Amber = ColorTranslator.FromHtml("#B96B2C");
     public static readonly Color AmberWash = ColorTranslator.FromHtml("#FFF0DB");
     public static readonly Color Success = ColorTranslator.FromHtml("#2B735C");
+    public static readonly Color Sidebar = ColorTranslator.FromHtml("#EEEFE9");
     public static readonly Font UiFont = CreateFont(9.5f);
 
     public static Font CreateFont(

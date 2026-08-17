@@ -7,6 +7,13 @@ project_root=${script_dir:h}
 info_plist="$project_root/swift-app/Info.plist"
 version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$info_plist")
 
+# 源码已按 Models / Bridge / Theme / Views 分目录，这里按目录收集而不是列单个文件。
+sources=("$project_root"/swift-app/**/*.swift)
+if (( ${#sources} == 0 )); then
+  print -u2 "swift-app 下没有找到任何 .swift 源文件。"
+  exit 1
+fi
+
 mkdir -p "$project_root/build"
 build_root=$(mktemp -d "$project_root/build/forma-fushi-${version}.XXXXXX")
 arm_dir="$build_root/arm64"
@@ -27,7 +34,7 @@ xcrun swiftc \
   -parse-as-library \
   -target arm64-apple-macos13.0 \
   -module-cache-path "$build_root/module-cache-arm64" \
-  "$project_root/swift-app/WordFormatLibraryApp.swift" \
+  "${sources[@]}" \
   -o "$arm_dir/WordFormatLibrary"
 
 xcrun swiftc \
@@ -35,7 +42,7 @@ xcrun swiftc \
   -parse-as-library \
   -target x86_64-apple-macos13.0 \
   -module-cache-path "$build_root/module-cache-x86_64" \
-  "$project_root/swift-app/WordFormatLibraryApp.swift" \
+  "${sources[@]}" \
   -o "$intel_dir/WordFormatLibrary"
 
 lipo -create \

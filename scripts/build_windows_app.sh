@@ -3,7 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-VERSION="2.6.0"
+CSPROJ="$PROJECT_ROOT/windows-app/FormaFushi.Windows/FormaFushi.Windows.csproj"
+
+# 版本号只在 csproj 里维护一处，和 macOS 脚本读 Info.plist 的做法对齐。
+VERSION="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' "$CSPROJ" | head -n 1)"
+if [ -z "$VERSION" ]; then
+  echo "无法从 $CSPROJ 读取 <Version>，请检查工程文件。" >&2
+  exit 1
+fi
+
 PYTHON_VERSION="3.14.6"
 LXML_VERSION="6.1.1"
 DOTNET_VERSION="10.0.302"

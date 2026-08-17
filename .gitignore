@@ -4,9 +4,15 @@ __pycache__/
 *.log
 .coverage
 
+# Local virtual environments.  venv 自己会在 .venv/ 里放一个忽略一切的 .gitignore，
+# 但换成 virtualenv 等工具就没有了，所以这里显式声明。
+.venv/
+venv/
+
 # Local application builds and signed release bundles.
 build/
 build-v*
+outputs/
 release/
 release-v*/
 package/

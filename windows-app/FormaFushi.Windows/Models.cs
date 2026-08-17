@@ -1,6 +1,10 @@
 using System.Text.Json.Serialization;
+using FormaFushi.Windows.Generated;
 
 namespace FormaFushi.Windows;
+
+/// <summary>可以直接呈现给用户的失败，对应 Swift 侧的 AppFailure。</summary>
+internal sealed class AppFailure(string message) : Exception(message);
 
 internal sealed class ManagerEnvelope
 {
@@ -40,11 +44,10 @@ internal sealed class PackManifest
     [JsonPropertyName("id")]
     public string Id { get; set; } = "";
 
+    // 引擎必定输出 name/sample，Swift 侧对应字段也是非可选的；
+    // 这里的空串只是 C# 需要的初始值，不是会被用户看到的兜底文案。
     [JsonPropertyName("name")]
-    public string Name { get; set; } = "未命名格式";
-
-    [JsonPropertyName("source_file_name")]
-    public string? SourceFileName { get; set; }
+    public string Name { get; set; } = "";
 
     [JsonPropertyName("created_at")]
     public string? CreatedAt { get; set; }
@@ -84,6 +87,16 @@ internal sealed class PackManifest
 
     public string LibraryIdentity => PackPath ?? Id;
 
+    public int InferredCount => InferredStyleCount ?? 0;
+
+    public int HiddenCount => HiddenStyleCount
+        ?? Math.Max(0, (DefinedStyleCount ?? UsedStyleCount) - UsedStyleCount);
+
+    public bool HasNumberedHeadings =>
+        UsedFormats.Any(format => format.Type == "paragraph" && format.OutlineLevel.HasValue && format.Numbered);
+
+    public bool HasTableStyles => UsedFormats.Any(format => format.Type == "table");
+
     public string CreatedDisplay
     {
         get
@@ -93,7 +106,7 @@ internal sealed class PackManifest
                 return value.ToLocalTime().ToString("yyyy/MM/dd");
             }
 
-            return "日期未知";
+            return UIStrings.Sidebar.PackDateUnknown;
         }
     }
 
@@ -127,7 +140,7 @@ internal sealed class UsedFormat
     public string? InferenceLabel { get; set; }
 
     [JsonPropertyName("sample")]
-    public string Sample { get; set; } = "样式预览 · 中文 Aa 123";
+    public string Sample { get; set; } = "";
 
     [JsonPropertyName("font_latin")]
     public string? FontLatin { get; set; }

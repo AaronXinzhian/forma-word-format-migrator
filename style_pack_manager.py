@@ -903,6 +903,31 @@ def _part_checksums(entries: Dict[str, bytes]) -> Dict[str, str]:
     }
 
 
+def pack_file_stem(display_name: Optional[str]) -> str:
+    """把格式包的展示名收敛成两端通用、跨文件系统安全的文件名主干。
+
+    命名规则由引擎统一决定，客户端不再各自拼接，否则 Mac 与 Windows 的
+    格式库目录会长出两套互不兼容的文件名。
+    """
+    cleaned: List[str] = []
+    for character in (display_name or "").strip():
+        cleaned.append(character if character.isalnum() or character in "-_" else "-")
+    stem = re.sub(r"-{2,}", "-", "".join(cleaned)).strip("-")
+    return stem[:48] if stem else "word-format"
+
+
+def allocate_pack_path(library_dir: Path, display_name: Optional[str]) -> Path:
+    """在格式库目录里分配一个未占用的 .wfstyle 路径。"""
+    library_dir = library_dir.expanduser().resolve()
+    stem = pack_file_stem(display_name)
+    while True:
+        candidate = library_dir / (
+            "%s-%s%s" % (stem, uuid.uuid4().hex, PACK_SUFFIX)
+        )
+        if not candidate.exists():
+            return candidate
+
+
 def create_style_pack(
     source_path: Path,
     pack_path: Path,
@@ -1400,7 +1425,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     create_parser = subparsers.add_parser("create-pack")
     create_parser.add_argument("--source", required=True)
-    create_parser.add_argument("--out", required=True)
+    create_destination = create_parser.add_mutually_exclusive_group(required=True)
+    # --dir 让引擎决定文件名，是客户端应当使用的方式；--out 保留给脚本与测试。
+    create_destination.add_argument("--dir")
+    create_destination.add_argument("--out")
     create_parser.add_argument("--name")
     create_parser.add_argument("--force", action="store_true")
 
@@ -1428,9 +1456,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _package, _catalog, manifest = inspect_source(Path(args.source))
             _json_result({"ok": True, "pack": manifest})
         elif args.command == "create-pack":
+            if args.dir:
+                library_dir = Path(args.dir).expanduser()
+                library_dir.mkdir(parents=True, exist_ok=True)
+                destination = allocate_pack_path(library_dir, args.name)
+            else:
+                destination = Path(args.out)
             manifest = create_style_pack(
                 Path(args.source),
-                Path(args.out),
+                destination,
                 display_name=args.name,
                 force=args.force,
             )
