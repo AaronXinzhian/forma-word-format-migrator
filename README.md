@@ -114,11 +114,29 @@ python3 style_pack_manager.py apply-pack \
 
 ## 开发与验证
 
+先安装依赖。运行时只需要 `lxml`；回归测试还需要 `python-docx` 和 `Pillow` 来生成夹具：
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
+
 运行全部文档处理回归测试：
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
+
+运行 Mac 客户端的格式库删除策略测试：
+
+```bash
+xcrun swiftc -parse-as-library -D WORD_FORMAT_LIBRARY_TESTING \
+  swift-app/WordFormatLibraryApp.swift tests/PackDeletionPolicyTests.swift \
+  -o build/PackDeletionPolicyTests
+./build/PackDeletionPolicyTests
+```
+
+上述检查以及两端客户端的编译由 `.github/workflows/ci.yml` 在每次 push 和 PR 时自动执行。
 
 在 Mac 上构建同时支持 Apple Silicon 与 Intel 的签名应用和压缩包：
 
@@ -133,3 +151,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 Windows 构建脚本会校验并组装固定版本的 .NET、Windows Embeddable Python 与 `lxml`，生成 UTF-8 文件名兼容的 ZIP 和 SHA-256。构建结果写入本机 `build/` 和 `outputs/`，不应提交到 Git。Mac 应用内部继续使用原有 bundle ID 和数据目录；两个平台继续使用相同的 `.wfstyle` 结构。
+
+## 许可证
+
+本项目采用 [MIT 许可证](LICENSE)。

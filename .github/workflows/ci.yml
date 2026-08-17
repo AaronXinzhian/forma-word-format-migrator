@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-tests:
+    name: 文档引擎回归 (${{ matrix.os }} / Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: '3.11'
+          - os: ubuntu-latest
+            python-version: '3.14'
+          - os: macos-latest
+            python-version: '3.13'
+          # Windows 便携包内置 Python 3.14.x（见 scripts/build_windows_app.sh）。
+          # 引擎此前从未在 Windows 上跑过自动化测试，先以非阻断方式收集结果。
+          - os: windows-latest
+            python-version: '3.14'
+            experimental: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装依赖
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: 运行回归测试
+        shell: bash
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+  swift-checks:
+    name: Mac 客户端编译与删除策略测试
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 编译并运行 PackDeletionPolicyTests
+        run: |
+          mkdir -p build/ci
+          xcrun swiftc \
+            -parse-as-library \
+            -D WORD_FORMAT_LIBRARY_TESTING \
+            -target arm64-apple-macos13.0 \
+            -module-cache-path build/ci/module-cache-tests \
+            swift-app/WordFormatLibraryApp.swift \
+            tests/PackDeletionPolicyTests.swift \
+            -o build/ci/PackDeletionPolicyTests
+          ./build/ci/PackDeletionPolicyTests
+
+      - name: 交叉架构编译检查（Release 构型）
+        run: |
+          for target in arm64-apple-macos13.0 x86_64-apple-macos13.0; do
+            xcrun swiftc \
+              -O \
+              -parse-as-library \
+              -target "$target" \
+              -module-cache-path "build/ci/module-cache-${target}" \
+              swift-app/WordFormatLibraryApp.swift \
+              -o "build/ci/WordFormatLibrary-${target}"
+          done
+
+  windows-build:
+    name: Windows 客户端编译
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: 编译 WinForms 客户端
+        run: dotnet build windows-app/FormaFushi.Windows/FormaFushi.Windows.csproj -c Release
+
+      # 冒烟工具需要打包后的 runtime/ resources/ smoke-fixtures/ 布局才能运行，
+      # CI 里只做编译检查，实际执行仍依赖 scripts/build_windows_app.sh 的产物。
+      - name: 编译 Windows 冒烟工具
+        run: dotnet build tests/WindowsSmokeHarness/WindowsSmokeHarness.csproj -c Release
