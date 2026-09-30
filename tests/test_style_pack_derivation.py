@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, contextlib, copy, io, json, math, os, shutil, sys, tempfile, unittest, zipfile, pathlib, lxml, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, style_node(), write_pack_unchecked(), StylePackDerivationTests
+# [POS]: 验证多样式编辑派生与原格式资产保护
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Regression tests for safe, non-destructive style-pack editing."""
 
 from __future__ import annotations

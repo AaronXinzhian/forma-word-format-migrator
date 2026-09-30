@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, sys, tempfile, unittest, zipfile, pathlib, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, synthetic_info(), PackageResourceLimitTests
+# [POS]: 验证 Word ZIP 成员、体积及压缩资源边界
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Security limits for loading DOCX/OOXML ZIP packages."""
 
 from __future__ import annotations

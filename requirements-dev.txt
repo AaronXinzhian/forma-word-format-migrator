@@ -1,0 +1,9 @@
+# Forma 赋式 开发与测试依赖
+#
+# tests/make_fixtures.py 用 python-docx 和 Pillow 生成回归夹具，
+# 部分测试模块在导入期就会加载它，缺少时整个 unittest discover 会直接失败。
+
+-r requirements.txt
+
+python-docx==1.2.0
+Pillow==11.3.0

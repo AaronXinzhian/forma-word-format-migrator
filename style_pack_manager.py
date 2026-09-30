@@ -4,6 +4,11 @@
 The pack stores only allow-listed Word formatting XML plus a JSON manifest.
 It never retains source body/story text, pictures, macros, embedded fonts, or
 other document-owned binary objects.  UI samples are generated locally.
+
+[INPUT]: 依赖 __future__, argparse, base64, copy, hashlib, io, json, math, os, re, sys, tempfile, unicodedata, uuid, zipfile, collections, datetime, pathlib, typing, lxml, word_style_transfer
+[OUTPUT] Format-only packs, read-only preflights, atomic derived/document outputs
+[POS] Persistent format-library trust boundary and application command interface
+[PROTOCOL] Keep this header and the project indexes synchronized after edits.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ import argparse
 import base64
 import copy
 import hashlib
+import io
 import json
 import math
 import os
@@ -41,6 +47,132 @@ MAX_EDITS_JSON_BYTES = 1024 * 1024
 MAX_FONT_ALIASES_PER_FORMAT = 64
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 A = {"a": A_NS}
+
+FORMAT_ROOT_TAGS = {
+    "styles": core.qn(core.W_NS, "styles"),
+    "stylesWithEffects": core.qn(core.W_NS, "styles"),
+    "theme": core.qn(A_NS, "theme"),
+    "fontTable": core.qn(core.W_NS, "fonts"),
+    "numbering": core.qn(core.W_NS, "numbering"),
+}
+FORMAT_CONTENT_TYPES = {
+    "styles": "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
+    "stylesWithEffects": "application/vnd.ms-word.stylesWithEffects+xml",
+    "theme": "application/vnd.openxmlformats-officedocument.theme+xml",
+    "fontTable": "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml",
+    "numbering": "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml",
+    "settings": "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",
+}
+FORBIDDEN_FORMAT_TAGS = {
+    core.qn(core.W_NS, name)
+    for name in (
+        "embedRegular", "embedBold", "embedItalic", "embedBoldItalic",
+        "numPicBullet", "lvlPicBulletId", "drawing", "pict", "object",
+        "altChunk", "document", "body", "p", "r", "t", "instrText", "tbl",
+    )
+} | {core.qn(A_NS, "blip"), core.qn(A_NS, "blipFill")}
+
+
+def _validate_format_xml_hooks(root: etree._Element, label: str) -> None:
+    """Reject data-bearing nodes and relationship attributes at every depth."""
+    for node in root.iter():
+        if not isinstance(node.tag, str):
+            continue
+        if node.tag in FORBIDDEN_FORMAT_TAGS:
+            raise core.TransferError("格式库包含非格式内容或二进制挂钩：%s。" % label)
+        if any(attribute.startswith("{%s}" % core.R_NS) for attribute in node.attrib):
+            raise core.TransferError("格式库包含不允许的关系挂钩：%s。" % label)
+
+
+def _validate_format_entries(entries: Dict[str, bytes]) -> None:
+    """Reconstruct the exact format-only part set independently of checksums.
+
+    A checksum is corruption detection, not permission to add another package
+    graph.  Never follow a format part's own .rels or trust relationship tails.
+    """
+    rel_path = "word/_rels/document.xml.rels"
+    root = core.parse_xml(entries[rel_path], rel_path)
+    if root.tag != core.qn(core.PKG_REL_NS, "Relationships"):
+        raise core.TransferError("格式库主关系根节点无效。")
+    expected = {"[Content_Types].xml", rel_path}
+    roles: Dict[str, str] = {}
+    ids: Set[str] = set()
+    type_roles = {_relationship_type_for_role(role): role for role in core.ROLE_NAMES}
+    for rel in root:
+        if rel.tag != core.qn(core.PKG_REL_NS, "Relationship"):
+            raise core.TransferError("格式库包含未知主关系节点。")
+        if set(rel.attrib).difference({"Id", "Type", "Target", "TargetMode"}):
+            raise core.TransferError("格式库主关系属性无效。")
+        role = type_roles.get(rel.get("Type", ""))
+        rel_id = rel.get("Id", "")
+        target = rel.get("Target", "")
+        if not role or not rel_id or not target:
+            raise core.TransferError("格式库包含不允许的主关系。")
+        if rel.get("TargetMode") not in {None, "Internal"}:
+            raise core.TransferError("格式库不能包含外部关系。")
+        if role in roles or rel_id in ids:
+            raise core.TransferError("格式库包含重复的格式角色或关系 ID。")
+        # URI fragments, queries and backslashes are never package part paths.
+        if any(character in target for character in ("\\", "#", "?", ":", "%")):
+            raise core.TransferError("格式库关系路径无效。")
+        part = core.resolve_relationship_target("word/document.xml", target)
+        if not part.startswith("word/") or not part.endswith(".xml") or "/_rels/" in part:
+            raise core.TransferError("格式库格式关系只能指向 Word XML 部件。")
+        if part in expected:
+            raise core.TransferError("格式库多个角色指向同一部件。")
+        if part not in entries:
+            raise core.TransferError("格式库关系指向缺失部件：%s。" % part)
+        part_root = core.parse_xml(entries[part], part)
+        if part_root.tag != FORMAT_ROOT_TAGS[role]:
+            raise core.TransferError("格式库部件角色或 XML 命名空间无效：%s。" % part)
+        _validate_format_xml_hooks(part_root, part)
+        roles[role] = part
+        expected.add(part)
+        ids.add(rel_id)
+    if roles.get("styles") != "word/styles.xml":
+        raise core.TransferError("格式库缺少规范主样式关系。")
+    if "word/settings.xml" in entries:
+        expected.add("word/settings.xml")
+        settings = core.parse_xml(entries["word/settings.xml"], "settings.xml")
+        if settings.tag != core.qn(core.W_NS, "settings"):
+            raise core.TransferError("格式库设置根节点无效。")
+        if any(child.tag not in {core.qn(core.W_NS, tag) for tag in core.SETTINGS_FORMAT_TAGS} for child in settings):
+            raise core.TransferError("格式库设置包含不允许的标签。")
+        _validate_format_xml_hooks(settings, "settings.xml")
+    unknown = set(entries).difference(expected)
+    if unknown:
+        raise core.TransferError("格式库包含非白名单部件：%s。" % "、".join(sorted(unknown)))
+    content_types = core.parse_xml(entries["[Content_Types].xml"], "[Content_Types].xml")
+    if content_types.tag != core.qn(core.CT_NS, "Types"):
+        raise core.TransferError("格式库内容类型根节点无效。")
+    role_by_part = {part: role for role, part in roles.items()}
+    role_by_part["word/settings.xml"] = "settings"
+    seen_types: Set[Tuple[str, str]] = set()
+    for child in content_types:
+        if child.tag == core.qn(core.CT_NS, "Default"):
+            extension = child.get("Extension", "").casefold()
+            allowed_type = (
+                {"application/xml", "text/xml"} if extension == "xml"
+                else {"application/vnd.openxmlformats-package.relationships+xml"} if extension == "rels"
+                else set()
+            )
+            identity = ("Default", extension)
+            valid = set(child.attrib) == {"Extension", "ContentType"} and child.get("ContentType") in allowed_type
+        elif child.tag == core.qn(core.CT_NS, "Override"):
+            part = child.get("PartName", "").removeprefix("/")
+            role = role_by_part.get(part)
+            identity = ("Override", part)
+            valid = (
+                set(child.attrib) == {"PartName", "ContentType"}
+                and child.get("PartName") == "/" + part
+                and role is not None
+                and child.get("ContentType") == FORMAT_CONTENT_TYPES[role]
+            )
+        else:
+            raise core.TransferError("格式库包含未知内容类型节点。")
+        if not valid or identity in seen_types or len(child):
+            raise core.TransferError("格式库内容类型声明无效或重复。")
+        seen_types.add(identity)
 
 
 def _bool_value(node: Optional[etree._Element]) -> Optional[bool]:
@@ -439,6 +571,7 @@ def _style_preview(
     inferred: bool = False,
     inference_label: Optional[str] = None,
     paragraph_override: Optional[Dict[str, object]] = None,
+    numbering_restart: Optional[bool] = None,
 ) -> Dict[str, object]:
     info = catalog.styles.get(style_id)
     name = info.name if info is not None else style_id
@@ -678,9 +811,24 @@ def _style_preview(
             numbering_rule.level_text if numbering_rule is not None else None
         ),
         "numbering_example": numbering_example,
+        "numbering_start": numbering_rule.start if numbering_rule is not None else None,
+        "numbering_restart": numbering_restart,
         "table_fill_hex": table_fill,
         "table_accent_hex": table_accent,
     }
+    if style_node is not None and style_type == "table":
+        border = style_node.find("w:tblPr/w:tblBorders/w:top", namespaces=core.NS)
+        if border is not None:
+            preview["table_border_style"] = border.get(core.qn(core.W_NS, "val"))
+            preview["table_border_color_hex"] = _safe_hex(border.get(core.qn(core.W_NS, "color")))
+            try:
+                preview["table_border_width_pt"] = int(border.get(core.qn(core.W_NS, "sz"))) / 8.0
+            except (TypeError, ValueError):
+                pass
+        for side in ("top", "bottom", "left", "right"):
+            margin = style_node.find("w:tblPr/w:tblCellMar/w:%s" % side, namespaces=core.NS)
+            if margin is not None and margin.get(core.qn(core.W_NS, "type"), "dxa") == "dxa":
+                preview["table_cell_margin_%s_pt" % side] = _twips_to_pt(margin.get(core.qn(core.W_NS, "w")))
     aliases = font_aliases or {}
     if font_latin:
         latin_aliases = aliases.get(_font_alias_key(font_latin), [])
@@ -947,6 +1095,7 @@ def inspect_source(
                     theme,
                     font_aliases=font_aliases,
                     numbering_rule=heading_numbering.get(style_id),
+                    numbering_restart=_numbering_restarts(package.entries, heading_numbering.get(style_id)),
                     paragraph_override=heading_paragraph_properties.get(
                         style_id
                     ),
@@ -965,6 +1114,7 @@ def inspect_source(
                 theme,
                 font_aliases=font_aliases,
                 numbering_rule=heading_numbering.get(style_id),
+                numbering_restart=_numbering_restarts(package.entries, heading_numbering.get(style_id)),
                 inferred=True,
                 inference_label="智能补全",
                 paragraph_override=heading_paragraph_properties.get(style_id),
@@ -1137,14 +1287,7 @@ def _relationship_type_for_role(role: str) -> str:
 def _sanitize_format_part(role: str, data: bytes, part_name: str) -> bytes:
     """Keep formatting XML while dropping every binary relationship hook."""
     root = core.parse_xml(data, part_name)
-    expected_roots = {
-        "styles": {"styles"},
-        "stylesWithEffects": {"styles"},
-        "theme": {"theme"},
-        "fontTable": {"fonts"},
-        "numbering": {"numbering"},
-    }
-    if etree.QName(root).localname not in expected_roots[role]:
+    if root.tag != FORMAT_ROOT_TAGS[role]:
         raise core.TransferError("格式部件类型异常：%s" % part_name)
 
     if role == "fontTable":
@@ -1181,9 +1324,11 @@ def _sanitize_format_part(role: str, data: bytes, part_name: str) -> bytes:
 
 def _sanitized_settings(data: bytes) -> bytes:
     source_root = core.parse_xml(data, "settings.xml")
+    if source_root.tag != core.qn(core.W_NS, "settings"):
+        raise core.TransferError("源设置部件命名空间无效。")
     target_root = etree.Element(source_root.tag, nsmap=source_root.nsmap)
     for child in source_root:
-        if etree.QName(child).localname in core.SETTINGS_FORMAT_TAGS:
+        if child.tag in {core.qn(core.W_NS, tag) for tag in core.SETTINGS_FORMAT_TAGS}:
             target_root.append(copy.deepcopy(child))
     return core.serialize_xml(target_root)
 
@@ -1244,20 +1389,19 @@ def _pack_format_entries(source_entries: Dict[str, bytes]) -> Dict[str, bytes]:
             role, source_entries[part_name], part_name
         )
         collected.add(part_name)
-        source_rel = existing_by_role.get(role)
-        if source_rel is not None:
-            filtered_rels.append(copy.deepcopy(source_rel))
-        else:
-            rel = etree.SubElement(
-                filtered_rels, core.qn(core.PKG_REL_NS, "Relationship")
-            )
-            rel.set("Id", "rIdFmtPack%d" % relationship_index)
-            relationship_index += 1
-            rel.set("Type", rel_type)
-            rel.set(
-                "Target",
-                core.relative_relationship_target("word/document.xml", part_name),
-            )
+        # Construct relationships from the collected role, not source XML.
+        # Source .rels may contain extension attributes or external fallback
+        # records which have no authority inside a portable format pack.
+        rel = etree.SubElement(
+            filtered_rels, core.qn(core.PKG_REL_NS, "Relationship")
+        )
+        rel.set("Id", "rIdFmtPack%d" % relationship_index)
+        relationship_index += 1
+        rel.set("Type", _relationship_type_for_role(role))
+        rel.set(
+            "Target",
+            core.relative_relationship_target("word/document.xml", part_name),
+        )
 
     result["word/_rels/document.xml.rels"] = core.serialize_xml(filtered_rels)
     collected.add("word/_rels/document.xml.rels")
@@ -1295,6 +1439,31 @@ def _format_fingerprint(checksums: Dict[str, str]) -> str:
         digest.update(checksum.encode("ascii"))
         digest.update(b"\n")
     return digest.hexdigest()
+
+
+def pack_file_stem(display_name: Optional[str]) -> str:
+    """把格式包的展示名收敛成两端通用、跨文件系统安全的文件名主干。
+
+    命名规则由引擎统一决定，客户端不再各自拼接，否则 Mac 与 Windows 的
+    格式库目录会长出两套互不兼容的文件名。
+    """
+    cleaned: List[str] = []
+    for character in (display_name or "").strip():
+        cleaned.append(character if character.isalnum() or character in "-_" else "-")
+    stem = re.sub(r"-{2,}", "-", "".join(cleaned)).strip("-")
+    return stem[:48] if stem else "word-format"
+
+
+def allocate_pack_path(library_dir: Path, display_name: Optional[str]) -> Path:
+    """在格式库目录里分配一个未占用的 .wfstyle 路径。"""
+    library_dir = library_dir.expanduser().resolve()
+    stem = pack_file_stem(display_name)
+    while True:
+        candidate = library_dir / (
+            "%s-%s%s" % (stem, uuid.uuid4().hex, PACK_SUFFIX)
+        )
+        if not candidate.exists():
+            return candidate
 
 
 def _write_style_pack_archive(
@@ -1453,7 +1622,7 @@ def _validate_used_format_record(
     if not isinstance(raw.get("numbered"), bool):
         raise core.TransferError("格式库字段 %s.numbered 必须是布尔值。" % field)
 
-    for key in ("inferred", "configured", "bold", "italic"):
+    for key in ("inferred", "configured", "bold", "italic", "numbering_restart"):
         value = raw.get(key)
         if value is not None and not isinstance(value, bool):
             raise core.TransferError(
@@ -1471,6 +1640,8 @@ def _validate_used_format_record(
         "numbering_example",
         "table_fill_hex",
         "table_accent_hex",
+        "table_border_style",
+        "table_border_color_hex",
     ):
         value = raw.get(key)
         if value is not None:
@@ -1507,8 +1678,17 @@ def _validate_used_format_record(
         "right_indent_chars",
         "first_line_indent_chars",
         "hanging_indent_chars",
+        "table_border_width_pt",
+        "table_cell_margin_top_pt",
+        "table_cell_margin_bottom_pt",
+        "table_cell_margin_left_pt",
+        "table_cell_margin_right_pt",
     ):
         _manifest_optional_number(raw.get(key), "%s.%s" % (field, key))
+    if raw.get("numbering_start") is not None:
+        start = _manifest_nonnegative_int(raw["numbering_start"], "%s.numbering_start" % field)
+        if start > 32767:
+            raise core.TransferError("格式库编号起始值超出范围。")
     for key in ("outline_level", "numbering_level"):
         value = raw.get(key)
         if value is not None:
@@ -1817,11 +1997,15 @@ def _validate_style_pack_manifest(manifest: Dict[str, object]) -> None:
             )
 
 
-def load_style_pack(pack_path: Path) -> Tuple[Dict[str, object], Dict[str, bytes]]:
+def load_style_pack(pack_path: Path, expected_sha256: Optional[str] = None) -> Tuple[Dict[str, object], Dict[str, bytes]]:
     pack_path = pack_path.expanduser().resolve()
-    if not pack_path.exists() or not zipfile.is_zipfile(pack_path):
+    # Hash and parse the same bounded bytes.  Separate pathname hash/read
+    # operations permit A -> B -> A substitution between the two checks.
+    snapshot = core.read_package_snapshot(pack_path, "格式库", max_bytes=MAX_PACK_TOTAL_BYTES + 2 * 1024 * 1024, expected_sha256=expected_sha256)
+    stream = io.BytesIO(snapshot)
+    if not zipfile.is_zipfile(stream):
         raise core.TransferError("格式库不存在或已损坏：%s" % pack_path)
-    with zipfile.ZipFile(pack_path, "r") as archive:
+    with zipfile.ZipFile(stream, "r") as archive:
         member_list = archive.infolist()
         # Validate every central-directory record before testzip() or read()
         # can decompress attacker-controlled data.  The shared validator
@@ -1889,10 +2073,22 @@ def load_style_pack(pack_path: Path) -> Tuple[Dict[str, object], Dict[str, bytes
     _validate_style_pack_manifest(manifest)
     if manifest.get("format_part_count") != len(entries):
         raise core.TransferError("格式库部件数量与清单不一致。")
+    _validate_format_entries(entries)
+    # Section XML is stored in the manifest rather than the parts ZIP.  It
+    # needs the same namespace and relationship checks before any application.
+    _decode_layouts(manifest)
     manifest = dict(manifest)
+    # Older schema-1 packs did not persist a fingerprint, but exchange must
+    # still compare the verified formatting parts rather than a file name.
+    manifest.setdefault("format_fingerprint", _format_fingerprint(actual_checksums))
     manifest["pack_path"] = str(pack_path)
     _synthesize_legacy_font_aliases(manifest, entries)
     _synthesize_legacy_table_edit_candidate(manifest, entries)
+    if "heading_numbering_user_edits" in manifest:
+        runtime_entries = dict(entries)
+        runtime_entries["word/document.xml"] = _placeholder_document()
+        catalog = core.build_style_catalog(runtime_entries["word/styles.xml"], runtime_entries["word/document.xml"])
+        _numbering_user_edits(manifest, runtime_entries, catalog)
     return manifest, entries
 
 
@@ -1916,7 +2112,13 @@ def _decode_layouts(manifest: Dict[str, object]) -> List[List[etree._Element]]:
         for encoded in raw_layout:
             try:
                 data = base64.b64decode(str(encoded), validate=True)
-                layout.append(core.parse_xml(data, "格式库页面设置"))
+                if len(data) > MAX_PACK_MEMBER_BYTES:
+                    raise core.TransferError("格式库页面设置过大。")
+                node = core.parse_xml(data, "格式库页面设置")
+                if node.tag not in {core.qn(core.W_NS, tag) for tag in core.SECTION_LAYOUT_TAGS}:
+                    raise core.TransferError("格式库页面设置包含不允许的标签或命名空间。")
+                _validate_format_xml_hooks(node, "页面设置")
+                layout.append(node)
             except (ValueError, TypeError) as exc:
                 raise core.TransferError("格式库页面设置损坏：%s" % exc) from exc
         layouts.append(layout)
@@ -1945,16 +2147,29 @@ _PARAGRAPH_STYLE_EDIT_FIELDS = {
     "first_line_indent_chars",
     "hanging_indent_chars",
 }
-_TABLE_STYLE_EDIT_FIELDS = {"table_fill_hex", "table_accent_hex"}
+_NUMBERING_STYLE_EDIT_FIELDS = {
+    "numbering_format", "numbering_pattern", "numbering_start", "numbering_restart",
+}
+NUMBERING_FORMATS = {
+    "decimal", "decimalZero", "upperRoman", "lowerRoman", "upperLetter", "lowerLetter",
+    "chineseCounting", "chineseCountingThousand", "chineseLegalSimplified", "ideographTraditional",
+}
+TABLE_BORDER_STYLES = {"nil", "none", "single", "double", "dotted", "dashed", "dotDash", "dotDotDash"}
+_TABLE_STYLE_EDIT_FIELDS = {
+    "table_fill_hex", "table_accent_hex", "table_border_style", "table_border_color_hex",
+    "table_border_width_pt", *{"table_cell_margin_%s_pt" % side for side in ("top", "bottom", "left", "right")},
+}
 _STYLE_EDIT_FIELDS = (
     _RUN_STYLE_EDIT_FIELDS
     | _PARAGRAPH_STYLE_EDIT_FIELDS
     | _TABLE_STYLE_EDIT_FIELDS
+    | _NUMBERING_STYLE_EDIT_FIELDS
 )
 _DERIVED_MANIFEST_COPY_FIELDS = {
     "heading_authorities",
     "heading_completion_warnings",
     "heading_numbering",
+    "heading_numbering_user_edits",
     "heading_paragraph_indents",
     "heading_paragraph_properties",
     "heading_numbering_conflicts",
@@ -2140,6 +2355,35 @@ def _normalize_style_edits(payload: object) -> List[Dict[str, object]]:
             edit["table_accent_hex"] = _validated_edit_color(
                 raw_edit["table_accent_hex"], "表格强调色"
             )
+        if "table_border_color_hex" in raw_edit:
+            edit["table_border_color_hex"] = _validated_edit_color(raw_edit["table_border_color_hex"], "表格边框颜色")
+        if "table_border_style" in raw_edit:
+            value = _validated_short_text(raw_edit["table_border_style"], "表格边框类型", maximum=32)
+            if value not in TABLE_BORDER_STYLES:
+                raise core.TransferError("表格边框类型不受支持。")
+            edit["table_border_style"] = value
+        if "table_border_width_pt" in raw_edit:
+            edit["table_border_width_pt"] = _validated_edit_number(raw_edit["table_border_width_pt"], "表格边框宽度", 0.25, 12.0, 0.125)
+        for side in ("top", "bottom", "left", "right"):
+            field = "table_cell_margin_%s_pt" % side
+            if field in raw_edit:
+                edit[field] = _validated_edit_number(raw_edit[field], "表格单元格边距", 0.0, 1584.0, 0.05)
+        if "numbering_format" in raw_edit:
+            value = _validated_short_text(raw_edit["numbering_format"], "标题编号格式", maximum=32)
+            if value not in NUMBERING_FORMATS:
+                raise core.TransferError("标题编号格式不受支持。")
+            edit["numbering_format"] = value
+        if "numbering_pattern" in raw_edit:
+            edit["numbering_pattern"] = _validated_short_text(raw_edit["numbering_pattern"], "标题编号模式", maximum=128)
+        if "numbering_start" in raw_edit:
+            value = raw_edit["numbering_start"]
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 32767:
+                raise core.TransferError("标题编号起始值必须是 1–32767 之间的整数。")
+            edit["numbering_start"] = value
+        if "numbering_restart" in raw_edit:
+            if not isinstance(raw_edit["numbering_restart"], bool):
+                raise core.TransferError("标题编号重启设置必须是 true 或 false。")
+            edit["numbering_restart"] = raw_edit["numbering_restart"]
 
         if "alignment" in raw_edit:
             alignment = _validated_short_text(
@@ -2256,6 +2500,53 @@ def _normalize_style_edits(payload: object) -> List[Dict[str, object]]:
             raise core.TransferError("样式 %s 没有提供任何可修改字段。" % style_id)
         normalized_edits.append(edit)
     return normalized_edits
+
+
+def _numbering_user_edits(
+    manifest: Dict[str, object],
+    entries: Dict[str, bytes],
+    catalog: core.StyleCatalog,
+) -> List[Dict[str, object]]:
+    """Recover explicit numbering choices, including pre-marker derived packs.
+
+    Only user-edited fields are replayed after legacy hierarchy/font repair.
+    Unedited inferred levels continue to receive the existing calibration.
+    """
+    saved = manifest.get("heading_numbering_user_edits")
+    if saved is not None:
+        if not isinstance(saved, dict):
+            raise core.TransferError("格式库的用户标题编号编辑清单无效。")
+        raw_edits: List[Dict[str, object]] = []
+        for style_id, fields in saved.items():
+            if not isinstance(fields, dict) or not fields or set(fields).difference(_NUMBERING_STYLE_EDIT_FIELDS):
+                raise core.TransferError("格式库的用户标题编号字段无效。")
+            raw_edits.append({"style_id": style_id, **fields})
+        edits = _normalize_style_edits({"styles": raw_edits}) if raw_edits else []
+    else:
+        # Older derivatives recorded field names but not an accumulated edit
+        # map.  Recover their values from the verified, effective number rules.
+        edits = []
+        derivation = manifest.get("derivation")
+        records = derivation.get("edited_styles", []) if isinstance(derivation, dict) else []
+        rules = core.heading_numbering_from_manifest(manifest.get("heading_numbering"), entries, catalog)
+        if isinstance(records, list):
+            for record in records:
+                if not isinstance(record, dict) or not isinstance(record.get("fields"), list):
+                    continue
+                style_id = str(record.get("style_id", ""))
+                rule = rules.get(style_id)
+                if rule is None:
+                    continue
+                values = {"numbering_format": rule.number_format, "numbering_pattern": rule.level_text, "numbering_start": rule.start, "numbering_restart": _numbering_restarts(entries, rule)}
+                fields = {field: values[field] for field in record["fields"] if isinstance(field, str) and field in _NUMBERING_STYLE_EDIT_FIELDS and values[field] is not None}
+                if fields:
+                    edits.extend(_normalize_style_edits({"styles": [{"style_id": style_id, **fields}]}))
+    exposed = {str(item.get("style_id")) for item in manifest.get("used_formats", []) if isinstance(item, dict) and item.get("type") == "paragraph" and item.get("outline_level") is not None}
+    for edit in edits:
+        style_id = str(edit["style_id"])
+        if style_id not in exposed or catalog.resolved_outline.get(style_id) is None:
+            raise core.TransferError("用户编号编辑指向的标题样式不可用：%s。" % style_id)
+    return edits
 
 
 def _ordered_insert_child(
@@ -2592,6 +2883,42 @@ def _apply_style_node_edit(
                 cell_properties, "shd", _TABLE_CELL_PROPERTY_ORDER
             )
             _set_solid_shading(shading, str(edit["table_accent_hex"]))
+        border_fields = {"table_border_style", "table_border_color_hex", "table_border_width_pt"}.intersection(edit)
+        if border_fields:
+            table_properties = _ensure_ordered_child(style_node, "tblPr", core.STYLE_CHILD_ORDER)
+            borders = _ensure_ordered_child(table_properties, "tblBorders", _TABLE_PROPERTY_ORDER)
+            for side in ("top", "left", "bottom", "right", "insideH", "insideV"):
+                border = _ensure_ordered_child(borders, side, ("top", "left", "bottom", "right", "insideH", "insideV"))
+                # Missing borders get a complete single-line definition rather
+                # than inheriting an undocumented Word default.
+                if border.get(core.qn(core.W_NS, "val")) is None:
+                    border.set(core.qn(core.W_NS, "val"), "single")
+            # Conditional cell/table borders override the root table border in
+            # Word.  Apply the requested fields to every existing border in
+            # this same style, without creating conditional regions or changing
+            # unrelated fields such as spacing, shading and omitted attributes.
+            border_sides = {"top", "start", "left", "bottom", "end", "right", "insideH", "insideV", "tl2br", "tr2bl"}
+            for border in style_node.xpath(".//w:tblBorders/* | .//w:tcBorders/*", namespaces=core.NS):
+                if border.tag not in {core.qn(core.W_NS, side) for side in border_sides}:
+                    continue
+                if "table_border_style" in edit:
+                    border.set(core.qn(core.W_NS, "val"), str(edit["table_border_style"]))
+                if "table_border_color_hex" in edit:
+                    for attribute in ("themeColor", "themeTint", "themeShade"):
+                        border.attrib.pop(core.qn(core.W_NS, attribute), None)
+                    border.set(core.qn(core.W_NS, "color"), str(edit["table_border_color_hex"]))
+                if "table_border_width_pt" in edit:
+                    border.set(core.qn(core.W_NS, "sz"), str(round(float(edit["table_border_width_pt"]) * 8)))
+        margin_fields = {"table_cell_margin_%s_pt" % side for side in ("top", "bottom", "left", "right")}.intersection(edit)
+        if margin_fields:
+            table_properties = _ensure_ordered_child(style_node, "tblPr", core.STYLE_CHILD_ORDER)
+            margins = _ensure_ordered_child(table_properties, "tblCellMar", _TABLE_PROPERTY_ORDER)
+            for side in ("top", "left", "bottom", "right"):
+                field = "table_cell_margin_%s_pt" % side
+                if field in edit:
+                    margin = _ensure_ordered_child(margins, side, ("top", "left", "bottom", "right"))
+                    margin.set(core.qn(core.W_NS, "w"), _pt_to_twips(edit[field]))
+                    margin.set(core.qn(core.W_NS, "type"), "dxa")
 
 
 def _synchronize_heading_paragraph_properties(
@@ -2675,24 +3002,29 @@ def _apply_heading_numbering_edits(
     manifest: Dict[str, object],
     edits: Sequence[Dict[str, object]],
 ) -> None:
-    """Keep a heading's visible number label aligned with edited text."""
+    """Edit real heading number definitions and keep their label fonts aligned.
+
+    The public protocol cannot create an arbitrary numbering graph: a request
+    must point to an exposed heading with an existing concrete numbering rule.
+    """
     raw_rules = manifest.get("heading_numbering")
     if not isinstance(raw_rules, dict):
-        return
+        raw_rules = {}
     numbering_root, abstract_by_id, num_by_id, styles_by_id = core._numbering_index(
         entries
     )
-    if numbering_root is None:
-        return
     changed = False
     for edit in edits:
         run_edit = {
             key: value for key, value in edit.items() if key in _RUN_STYLE_EDIT_FIELDS
         }
-        if not run_edit:
+        numbering_edit = {key: value for key, value in edit.items() if key in _NUMBERING_STYLE_EDIT_FIELDS}
+        if not run_edit and not numbering_edit:
             continue
         raw_rule = raw_rules.get(str(edit["style_id"]))
         if not isinstance(raw_rule, dict):
+            if numbering_edit:
+                raise core.TransferError("样式 %s 没有可编辑的标题编号规则。" % edit["style_id"])
             continue
         raw_num_id = raw_rule.get("num_id")
         raw_level = raw_rule.get("level")
@@ -2702,12 +3034,29 @@ def _apply_heading_numbering_edits(
             continue
         num_node = num_by_id.get(str(raw_num_id))
         if num_node is None or not 0 <= level <= 8:
+            if numbering_edit:
+                raise core.TransferError("样式 %s 的标题编号规则无效。" % edit["style_id"])
             continue
         abstract = core._abstract_for_num(
             num_node, abstract_by_id, num_by_id, styles_by_id
         )
         if abstract is None:
+            if numbering_edit:
+                raise core.TransferError("样式 %s 的标题编号定义不存在。" % edit["style_id"])
             continue
+        if numbering_edit:
+            pattern = numbering_edit.get("numbering_pattern")
+            if pattern is not None:
+                placeholders = re.findall(r"%([1-9])", str(pattern))
+                if (
+                    re.search(r"%(?![1-9])", str(pattern))
+                    or not placeholders
+                    or any(int(value) > level + 1 for value in placeholders)
+                    or str(level + 1) not in placeholders
+                ):
+                    raise core.TransferError("标题编号模式必须包含当前层级 %%%d，且不能引用更深的层级。" % (level + 1))
+            if level == 0 and numbering_edit.get("numbering_restart") is True:
+                raise core.TransferError("最高一级标题没有上一级，不能设置随上一级重新编号。")
         level_nodes: List[etree._Element] = []
         base_level = core._level_node(abstract, level)
         if base_level is not None:
@@ -2720,14 +3069,26 @@ def _apply_heading_numbering_edits(
         )
         if override_level is not None:
             level_nodes.append(override_level)
+        if numbering_edit and not level_nodes:
+            raise core.TransferError("样式 %s 的标题编号层级不存在。" % edit["style_id"])
         for level_node in level_nodes:
-            run_properties = level_node.find("w:rPr", namespaces=core.NS)
-            if run_properties is None:
-                run_properties = etree.SubElement(
-                    level_node, core.qn(core.W_NS, "rPr")
-                )
-            _apply_run_edits(run_properties, run_edit)
+            for field, tag in (("numbering_format", "numFmt"), ("numbering_pattern", "lvlText"), ("numbering_start", "start")):
+                if field in numbering_edit:
+                    core._set_level_child_value(level_node, tag, numbering_edit[field])
+            if "numbering_restart" in numbering_edit:
+                core._set_level_child_value(level_node, "lvlRestart", level if numbering_edit["numbering_restart"] else 0)
+            if run_edit:
+                run_properties = level_node.find("w:rPr", namespaces=core.NS)
+                if run_properties is None:
+                    run_properties = etree.SubElement(level_node, core.qn(core.W_NS, "rPr"))
+                _apply_run_edits(run_properties, run_edit)
             changed = True
+        # A concrete startOverride takes precedence over w:lvl/w:start.  Update
+        # both so a visible editor change is not shadowed by the old instance.
+        if "numbering_start" in numbering_edit and override is not None:
+            start_override = override.find("w:startOverride", namespaces=core.NS)
+            if start_override is not None:
+                start_override.set(core.qn(core.W_NS, "val"), str(numbering_edit["numbering_start"]))
     if changed:
         _rels, roles = core.collect_format_relationships(entries)
         record = roles.get("numbering")
@@ -2737,6 +3098,33 @@ def _apply_heading_numbering_edits(
             else core.ROLE_FALLBACK_PARTS["numbering"]
         )
         entries[part_name] = core.serialize_xml(numbering_root)
+        catalog_entries = dict(entries)
+        catalog_entries["word/document.xml"] = _placeholder_document()
+        catalog = core.build_style_catalog(catalog_entries["word/styles.xml"], catalog_entries["word/document.xml"])
+        manifest["heading_numbering"] = core.heading_numbering_manifest(core.heading_numbering_from_manifest(raw_rules, catalog_entries, catalog))
+
+
+def _numbering_restarts(entries: Dict[str, bytes], rule: Optional[core.HeadingNumberingRule]) -> Optional[bool]:
+    """Read the effective restart value rather than an editor-only flag."""
+    if rule is None or rule.level == 0:
+        return None
+    _root, abstracts, nums, styles = core._numbering_index(entries)
+    num = nums.get(rule.num_id)
+    if num is None:
+        return None
+    abstract = core._abstract_for_num(num, abstracts, nums, styles)
+    override = core._override_for_level(num, rule.level)
+    overridden = override.find("w:lvl", namespaces=core.NS) if override is not None else None
+    base = core._level_node(abstract, rule.level) if abstract is not None else None
+    for node in (overridden, base):
+        if node is None:
+            continue
+        restart = node.find("w:lvlRestart", namespaces=core.NS)
+        if restart is not None:
+            value = core._safe_int(restart.get(core.qn(core.W_NS, "val")))
+            return value != 0 if value is not None else None
+    # Word's default is to restart after the immediately preceding level.
+    return True
 
 
 def _refresh_used_format_previews(
@@ -2811,6 +3199,7 @@ def _refresh_used_format_previews(
                 else None
             ),
             paragraph_override=heading_paragraph_properties.get(style_id),
+            numbering_restart=_numbering_restarts(runtime_entries, numbering.get(style_id)),
         )
         if configured:
             preview["configured"] = True
@@ -3084,6 +3473,8 @@ def derive_style_pack(
             raise core.TransferError("格式方案中不存在样式：%s。" % style_id)
         if style_id not in exposed_style_ids:
             raise core.TransferError("样式 %s 未在此格式方案的可编辑清单中。" % style_id)
+        if _NUMBERING_STYLE_EDIT_FIELDS.intersection(edit) and (info.style_type != "paragraph" or catalog.resolved_outline.get(style_id) is None):
+            raise core.TransferError("样式 %s 不是标题，不能编辑标题编号。" % style_id)
         _apply_style_node_edit(primary_nodes[style_id], info.style_type, edit)
     entries[styles_part] = core.serialize_xml(primary_root)
 
@@ -3128,7 +3519,17 @@ def derive_style_pack(
                 _apply_style_node_edit(node, info.style_type, edit)
         entries[effects_part] = core.serialize_xml(effects_root)
 
+    saved_numbering_edits = {
+        str(edit["style_id"]): {field: value for field, value in edit.items() if field in _NUMBERING_STYLE_EDIT_FIELDS}
+        for edit in _numbering_user_edits(effective_manifest, entries, catalog)
+    }
     _apply_heading_numbering_edits(entries, effective_manifest, edits)
+    for edit in edits:
+        fields = {field: value for field, value in edit.items() if field in _NUMBERING_STYLE_EDIT_FIELDS}
+        if fields:
+            saved_numbering_edits.setdefault(str(edit["style_id"]), {}).update(fields)
+    if saved_numbering_edits:
+        effective_manifest["heading_numbering_user_edits"] = saved_numbering_edits
     _append_missing_font_records(entries, edits)
     _synchronize_heading_paragraph_properties(
         effective_manifest, catalog, edits
@@ -3271,6 +3672,176 @@ def derive_style_pack(
     )
 
 
+def _file_sha256(path: Path, label: str) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as exc:
+        raise core.TransferError("无法读取%s：%s" % (label, exc)) from exc
+    return digest.hexdigest()
+
+
+def _check_preflight_hash(actual: str, expected: Optional[str], label: str) -> None:
+    if expected is not None and (not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected) or actual != expected):
+        raise core.TransferError("%s在预检后发生变化，请重新预检再应用。" % label)
+
+
+def _same_file(first: Path, second: Path) -> bool:
+    if first == second:
+        return True
+    try:
+        return first.exists() and second.exists() and os.path.samefile(first, second)
+    except OSError:
+        return False
+
+
+def _pack_application_identity(manifest: Dict[str, object]) -> str:
+    """Include applied metadata absent from the legacy part-only fingerprint."""
+    fields = ("section_layouts", "heading_authorities", "heading_numbering", "heading_numbering_user_edits", "heading_paragraph_indents", "heading_paragraph_properties", "used_table_styles", "preferred_table_style")
+    value = {key: manifest.get(key) for key in fields}
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def import_style_pack(pack_path: Path, library_dir: Path) -> Tuple[Dict[str, object], bool]:
+    """Validate a shared pack, deduplicate equivalent rules, reject ID reuse."""
+    pack_path = pack_path.expanduser().resolve()
+    manifest, entries = load_style_pack(pack_path)
+    library_dir = library_dir.expanduser().resolve()
+    existing: List[Dict[str, object]] = []
+    if library_dir.exists() and not library_dir.is_dir():
+        raise core.TransferError("格式库位置不是文件夹。")
+    for candidate in sorted(library_dir.glob("*" + PACK_SUFFIX)):
+        try:
+            saved, _saved_entries = load_style_pack(candidate)
+        except core.TransferError:
+            # list-library exposes these individual failures to the GUI.
+            continue
+        existing.append(saved)
+    fingerprint = manifest["format_fingerprint"]
+    identity = _pack_application_identity(manifest)
+    for saved in existing:
+        equivalent = saved["format_fingerprint"] == fingerprint and _pack_application_identity(saved) == identity
+        if saved["id"] == manifest["id"] and not equivalent:
+            raise core.TransferError("格式库 ID 冲突：同一方案标识对应不同格式，导入已停止。")
+    for saved in existing:
+        if saved["format_fingerprint"] == fingerprint and _pack_application_identity(saved) == identity:
+            return saved, False
+    destination = allocate_pack_path(library_dir, str(manifest["name"]))
+    return _write_style_pack_archive(destination, manifest, entries), True
+
+
+def export_style_pack(pack_path: Path, output: Path, force: bool = False) -> Dict[str, object]:
+    """Export a fully validated, portable pack without modifying its source."""
+    source = pack_path.expanduser().resolve()
+    output = output.expanduser().resolve()
+    if _same_file(source, output):
+        raise core.TransferError("为保护原格式方案，导出位置不能覆盖原文件。")
+    manifest, entries = load_style_pack(source)
+    return _write_style_pack_archive(output, manifest, entries, force=force)
+
+
+def preflight_style_pack(
+    pack_path: Path,
+    target: Path,
+    demote_headings: bool = False,
+    preserve_page_layout: bool = False,
+) -> Tuple[Dict[str, object], Dict[str, object]]:
+    """Read actual inputs and bind a non-writing impact report to their bytes."""
+    pack_path, target = pack_path.expanduser().resolve(), target.expanduser().resolve()
+    if target.suffix.lower() not in core.TARGET_SUFFIXES:
+        raise core.TransferError("内容目标文件只支持 .docx 或 .docm。")
+    if not isinstance(demote_headings, bool) or not isinstance(preserve_page_layout, bool):
+        raise core.TransferError("预检选项必须是布尔值。")
+    pack_hash = _file_sha256(pack_path, "格式方案")
+    target_hash = _file_sha256(target, "目标文件")
+    manifest, format_entries = load_style_pack(pack_path, expected_sha256=pack_hash)
+    package = core.load_package(target, "内容目标文件", expected_sha256=target_hash)
+    catalog = core.build_style_catalog(package.entries["word/styles.xml"], package.entries["word/document.xml"])
+    summary = {key: 0 for key in ("paragraph_count", "run_count", "table_count", "section_count", "character_count")}
+    levels: Counter[int] = Counter()
+    manual_paragraphs = manual_runs = 0
+    revisions = False
+    for name, data in package.entries.items():
+        if not core.is_content_part(name):
+            continue
+        root = core.parse_xml(data, name)
+        paragraphs = root.xpath("//w:p", namespaces=core.NS)
+        summary["paragraph_count"] += len(paragraphs)
+        summary["run_count"] += len(root.xpath("//w:r", namespaces=core.NS))
+        summary["table_count"] += len(root.xpath("//w:tbl", namespaces=core.NS))
+        summary["section_count"] += len(root.xpath("//w:sectPr", namespaces=core.NS))
+        summary["character_count"] += sum(len(value) for value in root.xpath("//w:t/text()", namespaces=core.NS))
+        revisions = revisions or bool(root.xpath("//w:ins | //w:del | //w:pPrChange | //w:rPrChange", namespaces=core.NS))
+        manual_runs += len(root.xpath("//w:r/w:rPr", namespaces=core.NS))
+        for paragraph in paragraphs:
+            properties = paragraph.find("w:pPr", namespaces=core.NS)
+            if properties is not None and any(core.local_name(node) not in {"pStyle", "sectPr"} for node in properties):
+                manual_paragraphs += 1
+            if name == "word/document.xml":
+                level = core.paragraph_outline_level(properties, catalog)
+                if level is not None:
+                    levels[level] += 1
+    fonts = sorted({str(item[field]) for item in manifest.get("used_formats", []) if isinstance(item, dict) for field in ("font_latin", "font_east_asia") if item.get(field)}, key=str.casefold)
+    has_tables = bool(manifest.get("used_table_styles"))
+    warnings = [str(value) for value in manifest.get("heading_completion_warnings", [])]
+    runtime_inferred_levels: List[int] = []
+    if demote_headings and levels:
+        source_entries = dict(format_entries)
+        source_entries["word/document.xml"] = _placeholder_document()
+        source_catalog = core.build_style_catalog(source_entries["word/styles.xml"], source_entries["word/document.xml"])
+        authorities = {
+            int(level): str(style_id)
+            for level, style_id in manifest.get("heading_authorities", {}).items()
+            if str(level).isdigit() and 0 <= int(level) <= 8 and source_catalog.resolved_outline.get(str(style_id)) == int(level)
+        }
+        if not authorities:
+            for item in manifest.get("used_formats", []):
+                if isinstance(item, dict) and item.get("type") == "paragraph" and isinstance(item.get("outline_level"), int) and not isinstance(item.get("outline_level"), bool):
+                    style_id, level = str(item.get("style_id")), int(item["outline_level"])
+                    if source_catalog.resolved_outline.get(style_id) == level:
+                        authorities.setdefault(level, style_id)
+        desired_levels = {min(8, level + 1) for level in levels}
+        missing = desired_levels.difference(authorities)
+        if missing and max(missing) >= 3:
+            rules = core.heading_numbering_from_manifest(manifest.get("heading_numbering"), source_entries, source_catalog)
+            if "heading_numbering" not in manifest:
+                rules = core.infer_heading_numbering_rules(source_entries, source_catalog, authorities.values())
+            completion = core.complete_heading_hierarchy(source_entries, source_catalog, authorities, rules, max_level=max(missing), extend_numbering=False)
+            authorities.update(completion.inferred_styles)
+            warnings.extend(completion.warnings)
+            runtime_inferred_levels = [level + 1 for level in sorted(completion.inferred_styles)]
+        unresolved = sorted(desired_levels.difference(authorities))
+        if unresolved:
+            raise core.TransferError("当前格式库无法生成%s，不能安全地把全部标题下调一级；请重新导入连续设置了标题一、标题二、标题三的模板。" % "、".join("标题%d" % (level + 1) for level in unresolved))
+    if summary["table_count"] and not has_tables:
+        warnings.append("格式方案没有实际使用的表格样式，将保留目标表格外观，仅移除单元格两字符首行缩进。")
+    if demote_headings and levels.get(8):
+        warnings.append("Word 最多支持标题9，%d 个标题9将保持原级别。" % levels[8])
+    if revisions:
+        warnings.append("目标文件包含修订，生成后请在 Word 中核对修订显示和格式。")
+    if any(name.lower().startswith("_xmlsignatures/") for name in package.entries):
+        warnings.append("目标文件带有数字签名，修改格式会使原签名失效，请使用未签名副本。")
+    if any(name.lower().endswith("vbaproject.bin") for name in package.entries):
+        warnings.append("目标文件包含宏，输出将保留宏部件，请在 Word 中核对。")
+    _check_preflight_hash(_file_sha256(pack_path, "格式方案"), pack_hash, "格式方案")
+    _check_preflight_hash(_file_sha256(target, "目标文件"), target_hash, "目标文件")
+    report: Dict[str, object] = {
+        "summary": summary,
+        "heading_level_counts": {str(level + 1): count for level, count in sorted(levels.items())},
+        "heading_demotion_count": sum(count for level, count in levels.items() if level < 8) if demote_headings else 0,
+        "runtime_inferred_heading_levels": runtime_inferred_levels,
+        "table_action": "apply_pack_table_style" if has_tables else "preserve_target_remove_two_character_indent",
+        "page_layout_action": "preserve_target" if preserve_page_layout else "apply_pack",
+        "font_names": fonts,
+        "manual_formatting": {"paragraph_count": manual_paragraphs, "run_count": manual_runs},
+        "warnings": list(dict.fromkeys(warnings)),
+        "input_binding": {"pack_sha256": pack_hash, "target_sha256": target_hash, "demote_headings": demote_headings, "preserve_page_layout": preserve_page_layout},
+    }
+    return manifest, report
+
+
 def apply_style_pack(
     pack_path: Path,
     target: Path,
@@ -3278,22 +3849,30 @@ def apply_style_pack(
     force: bool = False,
     preserve_page_layout: bool = False,
     demote_headings: bool = False,
+    expected_pack_sha256: Optional[str] = None,
+    expected_target_sha256: Optional[str] = None,
 ) -> Tuple[Dict[str, object], core.TransferStats]:
-    manifest, source_entries = load_style_pack(pack_path)
+    pack_path = pack_path.expanduser().resolve()
+    target = target.expanduser().resolve()
+    pack_hash = _file_sha256(pack_path, "格式方案")
+    target_hash = _file_sha256(target, "目标文件")
+    _check_preflight_hash(pack_hash, expected_pack_sha256, "格式方案")
+    _check_preflight_hash(target_hash, expected_target_sha256, "目标文件")
+    manifest, source_entries = load_style_pack(pack_path, expected_sha256=pack_hash)
     target = target.expanduser().resolve()
     output = output.expanduser().resolve()
     if target.suffix.lower() not in core.TARGET_SUFFIXES:
         raise core.TransferError("内容目标文件只支持 .docx 或 .docm。")
     if output.suffix.lower() != target.suffix.lower():
         raise core.TransferError("输出扩展名必须与目标文件一致。")
-    if output == target:
+    if _same_file(output, target) or _same_file(output, pack_path):
         raise core.TransferError("为保护原文件，输出位置不能覆盖目标文件。")
     if output.exists() and not force:
         raise core.TransferError("输出文件已存在。")
 
     source_entries = dict(source_entries)
     source_entries["word/document.xml"] = _placeholder_document()
-    target_package = core.load_package(target, "内容目标文件")
+    target_package = core.load_package(target, "内容目标文件", expected_sha256=target_hash)
     target_entries = dict(target_package.entries)
     target_catalog = core.build_style_catalog(
         target_entries["word/styles.xml"], target_entries["word/document.xml"]
@@ -3378,13 +3957,13 @@ def apply_style_pack(
     runtime_inferred_headings: Dict[int, str] = {}
     runtime_completion_warnings: List[str] = []
     if demote_headings:
-        target_heading_by_level = core.collect_used_heading_styles(
+        target_heading_levels = core.collect_used_heading_levels(
             target_entries,
             target_catalog,
             part_names=("word/document.xml",),
         )
         desired_heading_levels = {
-            min(8, level + 1) for level in target_heading_by_level
+            min(8, level + 1) for level in target_heading_levels
         }
         missing_heading_levels = sorted(
             desired_heading_levels.difference(heading_authorities)
@@ -3425,6 +4004,7 @@ def apply_style_pack(
             )
 
     runtime_numbering_repaired = False
+    saved_numbering_edits = _numbering_user_edits(manifest, source_entries, source_catalog)
     runtime_numbering_warning: Optional[str] = None
     base_runtime_rules = [
         heading_numbering.get(heading_authorities.get(level, ""))
@@ -3452,6 +4032,13 @@ def apply_style_pack(
             runtime_numbering_repaired = True
         elif repair_warning:
             runtime_numbering_warning = repair_warning
+    if saved_numbering_edits:
+        # Hierarchy repair rebuilds inferred levels (including starts/patterns)
+        # and calibrates legacy label fonts.  Reapply accumulated explicit
+        # number choices to the new rules without disabling that repair.
+        edited_manifest = {"heading_numbering": core.heading_numbering_manifest(heading_numbering)}
+        _apply_heading_numbering_edits(source_entries, edited_manifest, saved_numbering_edits)
+        heading_numbering = core.heading_numbering_from_manifest(edited_manifest["heading_numbering"], source_entries, source_catalog)
     used_heading_style_ids = set(heading_authorities.values())
     core.align_heading_style_numbering(
         source_entries, used_heading_style_ids, heading_numbering
@@ -3625,6 +4212,8 @@ def apply_style_pack(
         )
 
     core.transfer_format_parts(source_entries, target_entries, stats)
+    _check_preflight_hash(_file_sha256(pack_path, "格式方案"), pack_hash, "格式方案")
+    _check_preflight_hash(_file_sha256(target, "目标文件"), target_hash, "目标文件")
     core.write_package(target_package, target_entries, output)
     return manifest, stats
 
@@ -3680,7 +4269,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     create_parser = subparsers.add_parser("create-pack")
     create_parser.add_argument("--source", required=True)
-    create_parser.add_argument("--out", required=True)
+    create_destination = create_parser.add_mutually_exclusive_group(required=True)
+    # --dir 让引擎决定文件名，是客户端应当使用的方式；--out 保留给脚本与测试。
+    create_destination.add_argument("--dir")
+    create_destination.add_argument("--out")
     create_parser.add_argument("--name")
     create_parser.add_argument("--force", action="store_true")
 
@@ -3699,6 +4291,21 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser = subparsers.add_parser("list-library")
     list_parser.add_argument("--dir", required=True)
 
+    import_parser = subparsers.add_parser("import-pack")
+    import_parser.add_argument("--pack", required=True)
+    import_parser.add_argument("--dir", required=True)
+
+    export_parser = subparsers.add_parser("export-pack")
+    export_parser.add_argument("--pack", required=True)
+    export_parser.add_argument("--out", required=True)
+    export_parser.add_argument("--force", action="store_true")
+
+    preflight_parser = subparsers.add_parser("preflight-pack")
+    preflight_parser.add_argument("--pack", required=True)
+    preflight_parser.add_argument("--target", required=True)
+    preflight_parser.add_argument("--preserve-page-layout", action="store_true")
+    preflight_parser.add_argument("--demote-headings", action="store_true")
+
     apply_parser = subparsers.add_parser("apply-pack")
     apply_parser.add_argument("--pack", required=True)
     apply_parser.add_argument("--target", required=True)
@@ -3706,6 +4313,8 @@ def build_parser() -> argparse.ArgumentParser:
     apply_parser.add_argument("--force", action="store_true")
     apply_parser.add_argument("--preserve-page-layout", action="store_true")
     apply_parser.add_argument("--demote-headings", action="store_true")
+    apply_parser.add_argument("--expected-pack-sha256")
+    apply_parser.add_argument("--expected-target-sha256")
     return parser
 
 
@@ -3717,9 +4326,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _package, _catalog, manifest = inspect_source(Path(args.source))
             _json_result({"ok": True, "pack": manifest})
         elif args.command == "create-pack":
+            if args.dir:
+                library_dir = Path(args.dir).expanduser()
+                library_dir.mkdir(parents=True, exist_ok=True)
+                destination = allocate_pack_path(library_dir, args.name)
+            else:
+                destination = Path(args.out)
             manifest = create_style_pack(
                 Path(args.source),
-                Path(args.out),
+                destination,
                 display_name=args.name,
                 force=args.force,
             )
@@ -3739,6 +4354,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "list-library":
             result = list_library(Path(args.dir))
             _json_result({"ok": True, **result})
+        elif args.command == "import-pack":
+            manifest, imported = import_style_pack(Path(args.pack), Path(args.dir))
+            _json_result({"ok": True, "pack": manifest, "imported": imported})
+        elif args.command == "export-pack":
+            manifest = export_style_pack(Path(args.pack), Path(args.out), force=args.force)
+            _json_result({"ok": True, "pack": manifest, "output": str(Path(args.out).expanduser().resolve())})
+        elif args.command == "preflight-pack":
+            manifest, preflight = preflight_style_pack(Path(args.pack), Path(args.target), demote_headings=args.demote_headings, preserve_page_layout=args.preserve_page_layout)
+            _json_result({"ok": True, "pack": manifest, "preflight": preflight})
         elif args.command == "apply-pack":
             manifest, stats = apply_style_pack(
                 Path(args.pack),
@@ -3747,6 +4371,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 force=args.force,
                 preserve_page_layout=args.preserve_page_layout,
                 demote_headings=args.demote_headings,
+                expected_pack_sha256=args.expected_pack_sha256,
+                expected_target_sha256=args.expected_target_sha256,
             )
             _json_result(
                 {

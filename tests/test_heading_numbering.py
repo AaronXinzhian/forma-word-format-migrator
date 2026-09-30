@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, sys, tempfile, unittest, zipfile, pathlib, typing, lxml, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, NS, TARGET_HEADINGS, qn(), read_zip(), xml(), paragraph_for_text(), style_for_id(), effective_numbering_for_paragraph(), HeadingNumberingTests
+# [POS]: 验证标题样式和直接编号规则的迁移
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Regression coverage for transferring real multilevel heading numbering."""
 
 from __future__ import annotations

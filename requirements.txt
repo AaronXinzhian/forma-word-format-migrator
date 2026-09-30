@@ -1,0 +1,8 @@
+# Forma 赋式 运行时依赖
+#
+# 桌面版的实际依赖情况：
+#   - Windows 便携包自带 Python 与 lxml，版本固定在 scripts/build_windows_app.sh
+#   - Mac 版自带 Universal Python 与 lxml，版本固定在 scripts/build_macos_app.sh
+# 本文件面向命令行用户与 CI。
+
+lxml==6.1.1

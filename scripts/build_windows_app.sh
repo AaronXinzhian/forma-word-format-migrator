@@ -1,9 +1,21 @@
 #!/bin/bash
+# [INPUT]: 依赖 (未检出外部依赖)
+# [OUTPUT]: 提供明确标记未经 Windows 实机验证的 local-crossbuild 便携包与来源清单
+# [POS]: 构建层-Mac 交叉构建；Windows 正式验证使用 build_windows_app.ps1
+# [PROTOCOL]: 修改时更新此头部与 FOLDER_INDEX.md
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-VERSION="2.6.0"
+CSPROJ="$PROJECT_ROOT/windows-app/FormaFushi.Windows/FormaFushi.Windows.csproj"
+
+# 版本号只在 csproj 里维护一处，和 macOS 脚本读 Info.plist 的做法对齐。
+VERSION="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' "$CSPROJ" | head -n 1)"
+if [ -z "$VERSION" ]; then
+  echo "无法从 $CSPROJ 读取 <Version>，请检查工程文件。" >&2
+  exit 1
+fi
+
 PYTHON_VERSION="3.14.6"
 LXML_VERSION="6.1.1"
 DOTNET_VERSION="10.0.302"
@@ -11,17 +23,24 @@ DOTNET_HASH="b2286dec9177e8b5543ff2fe95c84db358b87ec2a36a0d34a29033d70279940fd11
 PYTHON_HASH="df901e84a896ff1ee720ad03377e0c8d8c2244fda79808aeeaff6316df1cb75c"
 LXML_HASH="b2d444f2e66624d68e9c6b211e28a76e22fff5fcabcfff4deac18b529b7d4137"
 
-BUILD_ROOT="$PROJECT_ROOT/build/windows"
+mkdir -p "$PROJECT_ROOT/build"
+BUILD_ROOT="$(mktemp -d "$PROJECT_ROOT/build/windows-crossbuild.XXXXXX")"
 DOWNLOAD_ROOT="$PROJECT_ROOT/build/downloads"
 TOOLCHAIN_ROOT="$PROJECT_ROOT/build/toolchains/dotnet"
 DOTNET_ARCHIVE="$PROJECT_ROOT/build/toolchains/dotnet-sdk.tar.gz"
 PUBLISH_ROOT="$BUILD_ROOT/publish"
-PACKAGE_NAME="Forma赋式-Windows-x64-v${VERSION}"
+PACKAGE_NAME="Forma赋式-Windows-x64-v${VERSION}-local-crossbuild"
 PACKAGE_ROOT="$BUILD_ROOT/portable/$PACKAGE_NAME"
 OUTPUT_ROOT="${FORMA_OUTPUT_DIR:-$PROJECT_ROOT/../../outputs}"
 ZIP_PATH="$OUTPUT_ROOT/$PACKAGE_NAME.zip"
 
 mkdir -p "$DOWNLOAD_ROOT" "$PROJECT_ROOT/build/toolchains" "$OUTPUT_ROOT"
+BUILD_PYTHON="${FORMA_BUILD_PYTHON:-/usr/bin/python3}"
+(
+  cd "$PROJECT_ROOT"
+  "$BUILD_PYTHON" scripts/gen_ui_strings.py --check
+  "$BUILD_PYTHON" -m unittest discover -s tests -p 'test_*.py' -v
+)
 
 if [ ! -x "$TOOLCHAIN_ROOT/dotnet" ]; then
   mkdir -p "$TOOLCHAIN_ROOT"
@@ -51,8 +70,10 @@ if [ ! -f "$LXML_WHEEL" ]; then
 fi
 printf '%s  %s\n' "$LXML_HASH" "$LXML_WHEEL" | shasum -a 256 -c -
 
-rm -rf "$PUBLISH_ROOT" "$PACKAGE_ROOT"
 mkdir -p "$PUBLISH_ROOT" "$PACKAGE_ROOT/runtime/Lib/site-packages" "$PACKAGE_ROOT/resources" "$PACKAGE_ROOT/第三方许可"
+"$BUILD_PYTHON" "$PROJECT_ROOT/scripts/source_manifest.py" --root "$PROJECT_ROOT" \
+  --out "$BUILD_ROOT/source-start.json" --platform Windows --toolchain ".NET SDK $DOTNET_VERSION" \
+  --channel "Mac 交叉构建（未完成 Windows 运行验证）"
 
 "$TOOLCHAIN_ROOT/dotnet" publish \
   "$PROJECT_ROOT/windows-app/FormaFushi.Windows/FormaFushi.Windows.csproj" \
@@ -79,6 +100,7 @@ unzip -q "$LXML_WHEEL" -d "$PACKAGE_ROOT/runtime/Lib/site-packages"
 cp "$PROJECT_ROOT/style_pack_manager.py" "$PACKAGE_ROOT/resources/style_pack_manager.py"
 cp "$PROJECT_ROOT/word_style_transfer.py" "$PACKAGE_ROOT/resources/word_style_transfer.py"
 cp "$PROJECT_ROOT/windows-app/README-Windows.md" "$PACKAGE_ROOT/使用说明.md"
+cp "$PROJECT_ROOT/LICENSE" "$PACKAGE_ROOT/LICENSE"
 
 if [ -f "$PACKAGE_ROOT/runtime/LICENSE.txt" ]; then
   cp "$PACKAGE_ROOT/runtime/LICENSE.txt" "$PACKAGE_ROOT/第三方许可/Python-LICENSE.txt"
@@ -96,16 +118,29 @@ if [ -f "$TOOLCHAIN_ROOT/LICENSE.txt" ]; then
   cp "$TOOLCHAIN_ROOT/LICENSE.txt" "$PACKAGE_ROOT/第三方许可/dotnet-LICENSE.txt"
 fi
 
-find "$PACKAGE_ROOT" -name '.DS_Store' -delete
-rm -f "$ZIP_PATH" "$ZIP_PATH.sha256"
+for required_license in Python-LICENSE.txt lxml-LICENSES.txt dotnet-ThirdPartyNotices.txt dotnet-LICENSE.txt; do
+  if [ ! -f "$PACKAGE_ROOT/第三方许可/$required_license" ]; then
+    echo "缺少必要第三方许可：$required_license" >&2
+    exit 1
+  fi
+done
+"$BUILD_PYTHON" "$PROJECT_ROOT/scripts/source_manifest.py" --root "$PROJECT_ROOT" \
+  --out "$PACKAGE_ROOT/source-manifest.json" --platform Windows --toolchain ".NET SDK $DOTNET_VERSION" \
+  --channel "Mac 交叉构建（未完成 Windows 运行验证）"
+"$BUILD_PYTHON" -c 'import json,sys; a,b=[json.load(open(p,encoding="utf-8")) for p in sys.argv[1:]]; assert a["source_sha256"] == b["source_sha256"], "构建期间输入发生变化"' \
+  "$BUILD_ROOT/source-start.json" "$PACKAGE_ROOT/source-manifest.json"
+TEMPORARY_ZIP="$BUILD_ROOT/$PACKAGE_NAME.zip"
 (
   cd "$(dirname "$PACKAGE_ROOT")"
-  COPYFILE_DISABLE=1 /usr/bin/bsdtar -a -cf "$ZIP_PATH" "$PACKAGE_NAME"
+  COPYFILE_DISABLE=1 /usr/bin/bsdtar -a -cf "$TEMPORARY_ZIP" "$PACKAGE_NAME"
 )
+unzip -tq "$TEMPORARY_ZIP" >/dev/null
+mv -f "$TEMPORARY_ZIP" "$ZIP_PATH"
 (
   cd "$OUTPUT_ROOT"
   shasum -a 256 "$PACKAGE_NAME.zip" > "$PACKAGE_NAME.zip.sha256"
 )
 
 echo "Windows 便携包：$ZIP_PATH"
+echo "交叉构建尚未通过 Windows 运行门禁。正式发行前必须运行 scripts/build_windows_app.ps1。"
 echo "SHA-256：$(awk '{print $1}' "$ZIP_PATH.sha256")"

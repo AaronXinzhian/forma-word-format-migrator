@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 System.ComponentModel, System.Drawing.Drawing2D
+ * [OUTPUT]: 提供 Theme, CardPanel
+ * [POS]: 提供 Windows 统一视觉样式与卡片
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 using System.ComponentModel;
 using System.Drawing.Drawing2D;
 
@@ -16,6 +22,7 @@ internal static class Theme
     public static readonly Color Amber = ColorTranslator.FromHtml("#B96B2C");
     public static readonly Color AmberWash = ColorTranslator.FromHtml("#FFF0DB");
     public static readonly Color Success = ColorTranslator.FromHtml("#2B735C");
+    public static readonly Color Sidebar = ColorTranslator.FromHtml("#EEEFE9");
     public static readonly Font UiFont = CreateFont(9.5f);
 
     public static Font CreateFont(

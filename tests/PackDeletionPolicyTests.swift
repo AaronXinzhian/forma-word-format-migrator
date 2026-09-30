@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 AppKit, Foundation
+ * [OUTPUT]: 提供 PackDeletionPolicyTests
+ * [POS]: 验证 Mac 格式库删除的路径、链接和扩展名边界
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 import AppKit
 import Foundation
 

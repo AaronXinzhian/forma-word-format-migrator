@@ -1,12 +1,32 @@
+/**
+ * [INPUT]: 依赖 System.Text, FormaFushi.Windows.Generated
+ * [OUTPUT]: 提供 MainForm
+ * [POS]: 创建 Windows 三步流程控件和布局
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 using System.Text;
+using FormaFushi.Windows.Generated;
 
 namespace FormaFushi.Windows;
 
 internal sealed partial class MainForm
 {
-    private readonly Label _libraryCount = Theme.Label("本机已保存 0 套", 9, color: Theme.MutedInk);
+    private sealed record FilterOption(string Title, Func<UsedFormat, bool> Includes);
+
+    private static readonly FilterOption[] FilterOptions =
+    [
+        new(UIStrings.Filters.All, _ => true),
+        new(UIStrings.Filters.Headings, format => format.Type == "paragraph" && format.OutlineLevel.HasValue),
+        new(UIStrings.Filters.Paragraphs, format => format.Type == "paragraph" && !format.OutlineLevel.HasValue),
+        new(UIStrings.Filters.Characters, format => format.Type == "character"),
+        new(UIStrings.Filters.Tables, format => format.Type == "table")
+    ];
+
+    private readonly Label _libraryCount = Theme.Label(UIStrings.App.LibraryCount("0"), 9, color: Theme.MutedInk);
     private readonly FlowLayoutPanel _libraryList = new();
     private readonly Label _libraryNotice = Theme.Label("", 8.5f, color: Theme.Amber);
+    private readonly Panel _libraryHighlight = new();
+    private readonly System.Windows.Forms.Timer _highlightTimer = new();
     private readonly Panel _contentHost = new();
     private readonly Panel _emptyPage = new();
     private readonly Panel _previewPage = new();
@@ -14,6 +34,7 @@ internal sealed partial class MainForm
     private readonly Panel[] _stepPanels = new Panel[3];
     private readonly Label[] _stepNumbers = new Label[3];
     private readonly Label[] _stepTitles = new Label[3];
+    private readonly Label[] _stepSubtitles = new Label[3];
     private readonly Label _previewTitle = Theme.Label("", 21, FontStyle.Bold);
     private readonly Label _previewSummary = Theme.Label("", 9.5f, color: Theme.MutedInk);
     private readonly Label _statsLabel = Theme.Label("", 10, FontStyle.Bold);
@@ -21,6 +42,10 @@ internal sealed partial class MainForm
     private readonly ComboBox _formatFilter = new();
     private readonly DataGridView _formatsGrid = new();
     private readonly Label _formatProperties = Theme.Label("", 9.25f);
+    private readonly Label _pageOrientation = Theme.Label("", 8.5f, FontStyle.Bold, Theme.Green);
+    private readonly Label _pageSize = Theme.Label("", 8.5f, color: Theme.MutedInk);
+    private readonly Label _pageMarginVertical = Theme.Label("", 8.5f, color: Theme.MutedInk);
+    private readonly Label _pageMarginHorizontal = Theme.Label("", 8.5f, color: Theme.MutedInk);
     private readonly Label _applyPackTitle = Theme.Label("", 14, FontStyle.Bold);
     private readonly Label _applyPackSummary = Theme.Label("", 9, color: Theme.MutedInk);
     private readonly Panel _targetEmptyPanel = new();
@@ -29,7 +54,8 @@ internal sealed partial class MainForm
     private readonly Label _targetPathLabel = Theme.Label("", 8.5f, color: Theme.MutedInk);
     private readonly CheckBox _applyPageLayout = new();
     private readonly CheckBox _demoteHeadings = new();
-    private readonly Button _applyButton = Theme.PrimaryButton("选择保存位置并应用");
+    private readonly Label _applyNotes = Theme.Label("", 9, color: Theme.MutedInk);
+    private readonly Button _applyButton = Theme.PrimaryButton(UIStrings.ApplyStep.ApplyButton);
     private readonly Panel _successPanel = new();
     private readonly Label _successPath = Theme.Label("", 8.5f, color: Theme.MutedInk);
     private readonly Label _successWarnings = Theme.Label("", 8.5f, color: Theme.Amber);
@@ -41,7 +67,7 @@ internal sealed partial class MainForm
 
     private void InitializeLayout()
     {
-        Text = "Forma 赋式｜Word 文档格式引擎";
+        Text = UIStrings.App.WindowTitle;
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(1180, 680);
         MinimumSize = new Size(1080, 680);
@@ -64,17 +90,23 @@ internal sealed partial class MainForm
         Controls.Add(_busyOverlay);
         _busyOverlay.BringToFront();
 
+        _highlightTimer.Interval = 1600;
+        _highlightTimer.Tick += (_, _) =>
+        {
+            _highlightTimer.Stop();
+            _libraryHighlight.Visible = false;
+        };
+
         FormClosing += (_, args) =>
         {
             if (_isBusy)
             {
-                var shouldExit = MessageBox.Show(
+                var shouldExit = ConfirmDialog.Show(
                     this,
-                    "文档仍在处理中。确定要退出吗？",
-                    "退出 Forma 赋式",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question,
-                    MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+                    UIStrings.App.ExitBusyTitle,
+                    UIStrings.App.ExitBusyMessage,
+                    UIStrings.App.ExitBusyConfirm,
+                    UIStrings.App.ExitBusyCancel);
                 args.Cancel = !shouldExit;
                 if (shouldExit)
                 {
@@ -95,6 +127,8 @@ internal sealed partial class MainForm
             Padding = new Padding(30, 18, 30, 14)
         };
 
+        // 这个字是图标而不是文案：macOS 用 SF Symbol 表达同一位置，
+        // 图标风格属于计划里明确不统一的平台惯例，因此不进 ui-strings.json。
         var brandMark = new Label
         {
             Text = "赋",
@@ -105,9 +139,9 @@ internal sealed partial class MainForm
             Size = new Size(50, 50),
             Location = new Point(30, 20)
         };
-        var title = Theme.Label("Forma 赋式", 18, FontStyle.Bold, Color.White);
+        var title = Theme.Label(UIStrings.App.Brand, 18, FontStyle.Bold, Color.White);
         title.Location = new Point(96, 19);
-        var slogan = Theme.Label("一份范本，万卷同式。", 9.5f, color: Color.FromArgb(205, 226, 218));
+        var slogan = Theme.Label(UIStrings.App.Slogan, 9.5f, color: Color.FromArgb(205, 226, 218));
         slogan.Location = new Point(98, 53);
         _libraryCount.ForeColor = Color.FromArgb(205, 226, 218);
         _libraryCount.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -126,20 +160,20 @@ internal sealed partial class MainForm
         {
             Dock = DockStyle.Left,
             Width = 310,
-            BackColor = Color.FromArgb(238, 239, 233),
+            BackColor = Theme.Sidebar,
             Padding = new Padding(22, 24, 18, 18)
         };
-        var heading = Theme.Label("我的格式库", 15, FontStyle.Bold);
+        var heading = Theme.Label(UIStrings.Sidebar.Title, 15, FontStyle.Bold);
         heading.Location = new Point(22, 22);
-        var hint = Theme.Label("保存后无需重复上传样板", 8.5f, color: Theme.MutedInk);
+        var hint = Theme.Label(UIStrings.Sidebar.Hint, 8.5f, color: Theme.MutedInk);
         hint.Location = new Point(23, 52);
 
-        var importButton = Theme.PrimaryButton("＋  导入新的格式源");
+        var importButton = Theme.PrimaryButton("＋  " + UIStrings.Sidebar.ImportButton);
         importButton.AutoSize = false;
         importButton.SetBounds(22, 82, 270, 42);
         importButton.Click += (_, _) => BrowseSource();
 
-        var refreshButton = Theme.TextButton("刷新格式库");
+        var refreshButton = Theme.TextButton(UIStrings.Sidebar.RefreshButton);
         refreshButton.AutoSize = false;
         refreshButton.SetBounds(180, 128, 112, 30);
         refreshButton.Click += async (_, _) => await ReloadLibraryAsync();
@@ -155,12 +189,18 @@ internal sealed partial class MainForm
         _libraryList.SetBounds(13, 202, 288, 560);
         _libraryList.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
 
+        _libraryHighlight.Dock = DockStyle.Right;
+        _libraryHighlight.Width = 3;
+        _libraryHighlight.BackColor = Theme.Green;
+        _libraryHighlight.Visible = false;
+
         sidebar.Controls.Add(heading);
         sidebar.Controls.Add(hint);
         sidebar.Controls.Add(importButton);
         sidebar.Controls.Add(refreshButton);
         sidebar.Controls.Add(_libraryNotice);
         sidebar.Controls.Add(_libraryList);
+        sidebar.Controls.Add(_libraryHighlight);
         return sidebar;
     }
 
@@ -186,6 +226,7 @@ internal sealed partial class MainForm
         _toastPanel.Visible = false;
         _toastPanel.Controls.Add(_toastLabel);
         _toastPanel.Click += (_, _) => _toastPanel.Visible = false;
+        _toastLabel.Click += (_, _) => _toastPanel.Visible = false;
 
         main.Controls.Add(_contentHost);
         main.Controls.Add(_toastPanel);
@@ -213,7 +254,18 @@ internal sealed partial class MainForm
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333f));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333f));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.334f));
-        var titles = new[] { "导入格式源", "查看已用格式", "应用到文档" };
+        var titles = new[]
+        {
+            UIStrings.Steps.ImportTitle,
+            UIStrings.Steps.PreviewTitle,
+            UIStrings.Steps.ApplyTitle
+        };
+        var subtitles = new[]
+        {
+            UIStrings.Steps.ImportSubtitle,
+            UIStrings.Steps.PreviewSubtitle,
+            UIStrings.Steps.ApplySubtitle
+        };
         for (var index = 0; index < 3; index++)
         {
             var step = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 8, 8, 5), Cursor = Cursors.Hand };
@@ -223,20 +275,25 @@ internal sealed partial class MainForm
                 Font = Theme.CreateFont(9, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleCenter,
                 Size = new Size(28, 28),
-                Location = new Point(8, 8)
+                Location = new Point(8, 11)
             };
             var label = Theme.Label(titles[index], 9.5f, FontStyle.Bold);
-            label.Location = new Point(45, 11);
+            label.Location = new Point(45, 6);
+            var subtitle = Theme.Label(subtitles[index], 8, color: Theme.MutedInk);
+            subtitle.Location = new Point(46, 28);
             var capturedIndex = index + 1;
             step.Click += (_, _) => NavigateToStep(capturedIndex);
             number.Click += (_, _) => NavigateToStep(capturedIndex);
             label.Click += (_, _) => NavigateToStep(capturedIndex);
+            subtitle.Click += (_, _) => NavigateToStep(capturedIndex);
             step.Controls.Add(number);
             step.Controls.Add(label);
+            step.Controls.Add(subtitle);
             table.Controls.Add(step, index, 0);
             _stepPanels[index] = step;
             _stepNumbers[index] = number;
             _stepTitles[index] = label;
+            _stepSubtitles[index] = subtitle;
         }
 
         bar.Controls.Add(table);
@@ -262,42 +319,45 @@ internal sealed partial class MainForm
         var dropContents = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            RowCount = 6,
+            RowCount = 7,
             ColumnCount = 1,
             BackColor = Color.Transparent,
             Padding = new Padding(34, 52, 34, 35)
         };
-        dropContents.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        dropContents.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        dropContents.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        dropContents.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        dropContents.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        for (var row = 0; row < 6; row++)
+        {
+            dropContents.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        }
+
         dropContents.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var eyebrow = Theme.Label("第一步 · 格式样板", 9, FontStyle.Bold, Theme.Green);
-        var title = Theme.Label("先选择一份“格式样板”", 19, FontStyle.Bold);
+        var eyebrow = Theme.Label(UIStrings.ImportStep.Eyebrow, 9, FontStyle.Bold, Theme.Green);
+        var title = Theme.Label(UIStrings.ImportStep.Title, 19, FontStyle.Bold);
         title.Margin = new Padding(0, 12, 0, 8);
-        var subtitle = Theme.Label("程序只提取格式系统，不保存文档正文、页眉页脚文字或批注内容。", 10, color: Theme.MutedInk);
+        var subtitle = Theme.Label(UIStrings.ImportStep.Subtitle, 10, color: Theme.MutedInk);
         subtitle.MaximumSize = new Size(430, 0);
         subtitle.Margin = new Padding(0, 0, 0, 28);
-        var chooseButton = Theme.PrimaryButton("选择 Word 格式源");
+        var chooseButton = Theme.PrimaryButton(UIStrings.ImportStep.ChooseButton);
         chooseButton.AutoSize = false;
         chooseButton.Width = 210;
         chooseButton.Height = 46;
         chooseButton.Margin = new Padding(0, 0, 0, 12);
         chooseButton.Click += (_, _) => BrowseSource();
-        var fileHint = Theme.Label("也可以把文件拖到这里 · 支持 DOCX、DOCM、DOTX、DOTM", 8.5f, color: Theme.MutedInk);
+        var dropHint = Theme.Label(UIStrings.ImportStep.DropHint, 9, color: Theme.MutedInk);
+        var formatHint = Theme.Label(UIStrings.ImportStep.SupportedFormats, 8.5f, color: Theme.MutedInk);
         dropContents.Controls.Add(eyebrow);
         dropContents.Controls.Add(title);
         dropContents.Controls.Add(subtitle);
         dropContents.Controls.Add(chooseButton);
-        dropContents.Controls.Add(fileHint);
+        dropContents.Controls.Add(dropHint);
+        dropContents.Controls.Add(formatHint);
         dropCard.Controls.Add(dropContents);
         dropCard.Resize += (_, _) =>
         {
             var availableWidth = Math.Max(200, dropCard.ClientSize.Width - 104);
             title.MaximumSize = new Size(availableWidth, 0);
             subtitle.MaximumSize = new Size(availableWidth, 0);
-            fileHint.MaximumSize = new Size(availableWidth, 0);
+            dropHint.MaximumSize = new Size(availableWidth, 0);
+            formatHint.MaximumSize = new Size(availableWidth, 0);
         };
         dropCard.DragEnter += (_, args) =>
         {
@@ -322,12 +382,12 @@ internal sealed partial class MainForm
         info.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         info.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         info.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var infoTitle = Theme.Label("一次导入，反复使用", 13, FontStyle.Bold);
+        var infoTitle = Theme.Label(UIStrings.ImportStep.InfoTitle, 13, FontStyle.Bold);
         infoTitle.Margin = new Padding(0, 0, 0, 20);
         info.Controls.Add(infoTitle);
-        info.Controls.Add(FeatureRow("01", "只展示文档里真正用过的格式"));
-        info.Controls.Add(FeatureRow("02", "保存标题编号、字体、段落与页面设置"));
-        info.Controls.Add(FeatureRow("03", "模板不含表格样式时，保留目标表格并清掉两字符首行缩进"));
+        info.Controls.Add(FeatureRow("01", UIStrings.ImportStep.Info1));
+        info.Controls.Add(FeatureRow("02", UIStrings.ImportStep.Info2));
+        info.Controls.Add(FeatureRow("03", UIStrings.ImportStep.Info3));
         infoCard.Controls.Add(info);
 
         layout.Controls.Add(dropCard, 0, 0);
@@ -372,22 +432,33 @@ internal sealed partial class MainForm
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
 
         var header = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
         _previewTitle.Location = new Point(0, 0);
         _previewSummary.AutoSize = false;
-        _previewSummary.SetBounds(1, 39, 670, 38);
-        var nextButton = Theme.PrimaryButton("下一步：选择目标文档");
+        _previewSummary.SetBounds(1, 39, 560, 38);
+        var nextButton = Theme.PrimaryButton(UIStrings.PreviewStep.NextButton);
         nextButton.AutoSize = false;
         nextButton.Size = new Size(210, 42);
         nextButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        nextButton.Location = new Point(680, 8);
-        header.Resize += (_, _) => nextButton.Location = new Point(header.ClientSize.Width - nextButton.Width, 8);
         nextButton.Click += (_, _) => ShowStep(3);
+        // 「换一套格式」在两端的统一行为：把注意力引到常驻格式库，而不是弹文件对话框。
+        var switchButton = Theme.SecondaryButton(UIStrings.PreviewStep.SwitchPackButton);
+        switchButton.AutoSize = false;
+        switchButton.Size = new Size(132, 42);
+        switchButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        switchButton.Click += (_, _) => HighlightLibrary();
+        header.Resize += (_, _) =>
+        {
+            nextButton.Location = new Point(header.ClientSize.Width - nextButton.Width, 8);
+            switchButton.Location = new Point(nextButton.Left - switchButton.Width - 10, 8);
+            _previewSummary.Width = Math.Max(200, switchButton.Left - 20);
+        };
         header.Controls.Add(_previewTitle);
         header.Controls.Add(_previewSummary);
         header.Controls.Add(nextButton);
+        header.Controls.Add(switchButton);
 
         var summaryCard = new CardPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 10), Padding = new Padding(16, 10, 16, 8) };
         _statsLabel.Location = new Point(16, 11);
@@ -406,20 +477,12 @@ internal sealed partial class MainForm
         };
         split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 68));
         split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
-        var listCard = BuildFormatsListCard();
-        var inspectorCard = BuildInspectorCard();
-        split.Controls.Add(listCard, 0, 0);
-        split.Controls.Add(inspectorCard, 1, 0);
+        split.Controls.Add(BuildFormatsListCard(), 0, 0);
+        split.Controls.Add(BuildInspectorCard(), 1, 0);
 
         var footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
-        var backButton = Theme.SecondaryButton("导入另一份模板");
-        backButton.AutoSize = false;
-        backButton.Size = new Size(150, 38);
-        backButton.Location = new Point(0, 10);
-        backButton.Click += (_, _) => BrowseSource();
-        var privacy = Theme.Label("格式方案仅保存在这台电脑上，可从左侧格式库随时删除。", 8.5f, color: Theme.MutedInk);
-        privacy.Location = new Point(170, 20);
-        footer.Controls.Add(backButton);
+        var privacy = Theme.Label(UIStrings.PreviewStep.Privacy, 8.5f, color: Theme.MutedInk);
+        privacy.Location = new Point(0, 12);
         footer.Controls.Add(privacy);
 
         root.Controls.Add(header, 0, 0);
@@ -433,13 +496,11 @@ internal sealed partial class MainForm
     {
         var card = new CardPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 10, 0), Padding = new Padding(14) };
         var header = new Panel { Dock = DockStyle.Top, Height = 48, BackColor = Color.Transparent };
-        var title = Theme.Label("文档中使用的格式", 12, FontStyle.Bold);
+        var title = Theme.Label(UIStrings.PreviewStep.ListTitle, 12, FontStyle.Bold);
         title.Location = new Point(0, 7);
         _formatFilter.DropDownStyle = ComboBoxStyle.DropDownList;
-        _formatFilter.Items.AddRange(["全部", "标题", "正文与段落", "字符", "表格"]);
-        _formatFilter.SelectedIndex = 0;
         _formatFilter.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        _formatFilter.SetBounds(435, 4, 126, 32);
+        _formatFilter.SetBounds(415, 4, 146, 32);
         header.Resize += (_, _) => _formatFilter.Left = header.ClientSize.Width - _formatFilter.Width;
         _formatFilter.SelectedIndexChanged += (_, _) => PopulateFormatsGrid();
         header.Controls.Add(title);
@@ -475,26 +536,61 @@ internal sealed partial class MainForm
         _formatsGrid.DefaultCellStyle.SelectionBackColor = Theme.Mint;
         _formatsGrid.DefaultCellStyle.SelectionForeColor = Theme.GreenDeep;
         _formatsGrid.GridColor = Theme.Line;
-        _formatsGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "格式", Name = "Name", Width = 138 });
-        _formatsGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "来源", Name = "Usage", Width = 78 });
-        _formatsGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "字体 / 字号", Name = "Font", Width = 138 });
-        _formatsGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "编号示意", Name = "Numbering", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 92 });
+        _formatsGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = UIStrings.FormatList.ColumnName, Name = "Name", Width = 138 });
+        _formatsGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = UIStrings.FormatList.ColumnUsage, Name = "Usage", Width = 78 });
+        _formatsGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = UIStrings.FormatList.ColumnFont, Name = "Font", Width = 138 });
+        _formatsGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = UIStrings.FormatList.ColumnNumbering, Name = "Numbering", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 92 });
         _formatsGrid.SelectionChanged += (_, _) => UpdateFormatInspector();
     }
 
     private CardPanel BuildInspectorCard()
     {
         var card = new CardPanel { Dock = DockStyle.Fill, Margin = new Padding(10, 0, 0, 0), Padding = new Padding(18) };
-        var title = Theme.Label("格式属性", 12, FontStyle.Bold);
+        var title = Theme.Label(UIStrings.Inspector.Title, 12, FontStyle.Bold);
         title.Dock = DockStyle.Top;
         title.Height = 32;
+
         _formatProperties.AutoSize = false;
         _formatProperties.Dock = DockStyle.Fill;
         _formatProperties.Padding = new Padding(0, 14, 0, 0);
         _formatProperties.ForeColor = Theme.Ink;
+
         card.Controls.Add(_formatProperties);
+        card.Controls.Add(BuildPageLayoutPanel());
         card.Controls.Add(title);
         return card;
+    }
+
+    /// <summary>
+    /// 页面设置改为结构化展示，字段与 Mac 端 PageLayoutCard 一致。
+    /// </summary>
+    private Panel BuildPageLayoutPanel()
+    {
+        var panel = new Panel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 128,
+            BackColor = Color.FromArgb(246, 249, 247),
+            Padding = new Padding(12, 10, 12, 10)
+        };
+        var title = Theme.Label(UIStrings.Inspector.PageTitle, 10, FontStyle.Bold);
+        title.Location = new Point(12, 10);
+        _pageOrientation.BackColor = Theme.Mint;
+        _pageOrientation.AutoSize = false;
+        _pageOrientation.TextAlign = ContentAlignment.MiddleCenter;
+        _pageOrientation.SetBounds(12, 36, 56, 24);
+        _pageOrientation.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+
+        _pageSize.Location = new Point(78, 40);
+        _pageMarginVertical.Location = new Point(13, 70);
+        _pageMarginHorizontal.Location = new Point(13, 94);
+
+        panel.Controls.Add(title);
+        panel.Controls.Add(_pageOrientation);
+        panel.Controls.Add(_pageSize);
+        panel.Controls.Add(_pageMarginVertical);
+        panel.Controls.Add(_pageMarginHorizontal);
+        return panel;
     }
 
     private void BuildApplyPage()
@@ -514,11 +610,11 @@ internal sealed partial class MainForm
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
 
         var header = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
-        var title = Theme.Label("最后，选择要修改的 Word 文件", 21, FontStyle.Bold);
+        var title = Theme.Label(UIStrings.ApplyStep.Title, 21, FontStyle.Bold);
         title.Location = new Point(0, 0);
-        var subtitle = Theme.Label("原文件不会被覆盖；处理结果会另存为一个新文件。", 9.5f, color: Theme.MutedInk);
+        var subtitle = Theme.Label(UIStrings.ApplyStep.Subtitle, 9.5f, color: Theme.MutedInk);
         subtitle.Location = new Point(1, 39);
-        var back = Theme.SecondaryButton("返回检查格式");
+        var back = Theme.SecondaryButton(UIStrings.ApplyStep.BackButton);
         back.AutoSize = false;
         back.Size = new Size(142, 38);
         back.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -531,11 +627,11 @@ internal sealed partial class MainForm
         var selectedCard = new CardPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 12), Padding = new Padding(17, 10, 17, 8) };
         _applyPackTitle.Location = new Point(17, 11);
         _applyPackSummary.Location = new Point(18, 39);
-        var change = Theme.TextButton("更换");
+        var change = Theme.TextButton(UIStrings.ApplyStep.ChangePackButton);
         change.AutoSize = false;
         change.Size = new Size(74, 32);
         change.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        change.Click += (_, _) => ShowStep(1);
+        change.Click += (_, _) => HighlightLibrary();
         selectedCard.Resize += (_, _) => change.Location = new Point(selectedCard.ClientSize.Width - change.Width - 13, 15);
         selectedCard.Controls.Add(_applyPackTitle);
         selectedCard.Controls.Add(_applyPackSummary);
@@ -560,7 +656,7 @@ internal sealed partial class MainForm
         _applyButton.Enabled = false;
         footer.Resize += (_, _) => _applyButton.Location = new Point(footer.ClientSize.Width - _applyButton.Width, 10);
         _applyButton.Click += async (_, _) => await ApplyPackAsync();
-        var footerHint = Theme.Label("正文、图片、表格结构与页眉页脚内容会被保留", 8.5f, color: Theme.MutedInk);
+        var footerHint = Theme.Label(UIStrings.ApplyStep.NoteKeepContent, 8.5f, color: Theme.MutedInk);
         footerHint.Location = new Point(0, 24);
         footer.Controls.Add(footerHint);
         footer.Controls.Add(_applyButton);
@@ -575,38 +671,42 @@ internal sealed partial class MainForm
     private CardPanel BuildTargetCard()
     {
         var card = new CardPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 10, 0), Padding = new Padding(20) };
-        var title = Theme.Label("目标 Word 文件", 13, FontStyle.Bold);
+        var title = Theme.Label(UIStrings.ApplyStep.TargetTitle, 13, FontStyle.Bold);
         title.Dock = DockStyle.Top;
         title.Height = 38;
 
         _targetEmptyPanel.Dock = DockStyle.Top;
-        _targetEmptyPanel.Height = 138;
+        _targetEmptyPanel.Height = 160;
         _targetEmptyPanel.BackColor = Color.FromArgb(246, 249, 247);
         _targetEmptyPanel.AllowDrop = true;
-        var emptyTitle = Theme.Label("上传要修改格式的 Word 文件", 11, FontStyle.Bold);
+        var emptyTitle = Theme.Label(UIStrings.ApplyStep.TargetEmptyTitle, 11, FontStyle.Bold);
         emptyTitle.Location = new Point(18, 17);
-        var emptyHint = Theme.Label("支持 DOCX 与保留宏的 DOCM", 8.5f, color: Theme.MutedInk);
+        var emptyHint = Theme.Label(UIStrings.ApplyStep.TargetEmptyHint, 8.5f, color: Theme.MutedInk);
         emptyHint.Location = new Point(19, 48);
-        var choose = Theme.PrimaryButton("选择目标文件");
+        var choose = Theme.PrimaryButton(UIStrings.ApplyStep.ChooseTargetButton);
         choose.AutoSize = false;
         choose.Size = new Size(146, 38);
         choose.Location = new Point(18, 82);
         choose.Click += (_, _) => BrowseTarget();
+        var dropHint = Theme.Label(UIStrings.ApplyStep.TargetDropHint, 8.5f, color: Theme.MutedInk);
+        dropHint.Location = new Point(19, 128);
         _targetEmptyPanel.Controls.Add(emptyTitle);
         _targetEmptyPanel.Controls.Add(emptyHint);
         _targetEmptyPanel.Controls.Add(choose);
+        _targetEmptyPanel.Controls.Add(dropHint);
         _targetEmptyPanel.DragEnter += (_, args) => args.Effect = args.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
         _targetEmptyPanel.DragDrop += (_, args) => HandleTargetDrop(args);
 
         _targetChosenPanel.Dock = DockStyle.Top;
-        _targetChosenPanel.Height = 138;
+        _targetChosenPanel.Height = 160;
         _targetChosenPanel.BackColor = Color.FromArgb(235, 244, 239);
+        _targetChosenPanel.AllowDrop = true;
         _targetChosenPanel.Visible = false;
         _targetName.Location = new Point(18, 18);
         _targetPathLabel.AutoSize = false;
         _targetPathLabel.SetBounds(19, 50, 120, 27);
         _targetPathLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-        var change = Theme.SecondaryButton("更换目标文件");
+        var change = Theme.SecondaryButton(UIStrings.ApplyStep.ChangeTargetButton);
         change.AutoSize = false;
         change.Size = new Size(138, 36);
         change.Location = new Point(18, 85);
@@ -614,6 +714,8 @@ internal sealed partial class MainForm
         _targetChosenPanel.Controls.Add(_targetName);
         _targetChosenPanel.Controls.Add(_targetPathLabel);
         _targetChosenPanel.Controls.Add(change);
+        _targetChosenPanel.DragEnter += (_, args) => args.Effect = args.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
+        _targetChosenPanel.DragDrop += (_, args) => HandleTargetDrop(args);
         _targetChosenPanel.Resize += (_, _) =>
             _targetPathLabel.Width = Math.Max(100, _targetChosenPanel.ClientSize.Width - 38);
 
@@ -632,7 +734,7 @@ internal sealed partial class MainForm
         successContents.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
         successContents.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         successContents.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
-        var successTitle = Theme.Label("格式已经应用完成", 12, FontStyle.Bold, Theme.Success);
+        var successTitle = Theme.Label(UIStrings.Success.Title, 12, FontStyle.Bold, Theme.Success);
         successTitle.Dock = DockStyle.Fill;
         _successPath.AutoSize = false;
         _successPath.Dock = DockStyle.Fill;
@@ -650,17 +752,17 @@ internal sealed partial class MainForm
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 28));
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
-        var open = Theme.PrimaryButton("打开结果");
+        var open = Theme.PrimaryButton(UIStrings.Success.OpenButton);
         open.AutoSize = false;
         open.Dock = DockStyle.Fill;
         open.Margin = new Padding(0, 0, 4, 0);
         open.Click += (_, _) => OpenOutput();
-        var reveal = Theme.SecondaryButton("在文件夹中显示");
+        var reveal = Theme.SecondaryButton(UIStrings.Success.RevealButton);
         reveal.AutoSize = false;
         reveal.Dock = DockStyle.Fill;
         reveal.Margin = new Padding(4, 0, 4, 0);
         reveal.Click += (_, _) => RevealOutput();
-        var next = Theme.TextButton("处理下一份");
+        var next = Theme.TextButton(UIStrings.Success.NextButton);
         next.AutoSize = false;
         next.Dock = DockStyle.Fill;
         next.Margin = new Padding(4, 0, 0, 0);
@@ -684,40 +786,46 @@ internal sealed partial class MainForm
     private CardPanel BuildOptionsCard()
     {
         var card = new CardPanel { Dock = DockStyle.Fill, Margin = new Padding(10, 0, 0, 0), Padding = new Padding(21) };
-        var title = Theme.Label("应用选项", 13, FontStyle.Bold);
+        var title = Theme.Label(UIStrings.ApplyStep.OptionsTitle, 13, FontStyle.Bold);
         title.Dock = DockStyle.Top;
         title.Height = 42;
 
-        _applyPageLayout.Text = "同步格式源的页面设置";
+        _applyPageLayout.Text = UIStrings.ApplyStep.OptionPageLayout;
         _applyPageLayout.Checked = true;
         _applyPageLayout.AutoSize = true;
         _applyPageLayout.Font = Theme.CreateFont(10, FontStyle.Bold);
         _applyPageLayout.ForeColor = Theme.Ink;
-        _applyPageLayout.Location = new Point(22, 66);
-        var layoutHint = Theme.Label("包含纸张、方向与页边距", 8.5f, color: Theme.MutedInk);
-        layoutHint.Location = new Point(45, 95);
+        _applyPageLayout.Location = new Point(22, 60);
+        var layoutHint = Theme.Label(UIStrings.ApplyStep.OptionPageLayoutHint, 8.5f, color: Theme.MutedInk);
+        layoutHint.Location = new Point(45, 88);
 
-        _demoteHeadings.Text = "所有标题向下调整一级";
+        _demoteHeadings.Text = UIStrings.ApplyStep.OptionDemote;
         _demoteHeadings.AutoSize = true;
         _demoteHeadings.Font = Theme.CreateFont(10, FontStyle.Bold);
         _demoteHeadings.ForeColor = Theme.Ink;
-        _demoteHeadings.Location = new Point(22, 138);
-        var demoteHint = Theme.Label("标题一→标题二，标题八→标题九；标题九保持不变", 8.5f, color: Theme.MutedInk);
-        demoteHint.Location = new Point(45, 167);
+        _demoteHeadings.Location = new Point(22, 124);
+        var demoteHint = Theme.Label(UIStrings.ApplyStep.OptionDemoteHint, 8.5f, color: Theme.MutedInk);
+        demoteHint.Location = new Point(45, 152);
+        var demoteNote = Theme.Label(UIStrings.ApplyStep.OptionDemoteNote, 8.5f, color: Theme.MutedInk);
+        demoteNote.AutoSize = false;
+        demoteNote.SetBounds(45, 174, 360, 34);
+        demoteNote.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
-        var divider = new Panel { BackColor = Theme.Line, Height = 1, Left = 22, Top = 210, Width = 380, Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
-        var preserved = Theme.Label("✓ 保留正文、图片、表格结构与页眉页脚内容\n\n✓ 清理旧样式和手工视觉格式\n\n✓ 表格无模板样式时保留外观，仅清掉两字符首行缩进\n\n✓ 始终另存为新文件", 9, color: Theme.MutedInk);
-        preserved.AutoSize = false;
-        preserved.SetBounds(22, 232, 405, 170);
-        preserved.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        var divider = new Panel { BackColor = Theme.Line, Height = 1, Left = 22, Top = 214, Width = 380, Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
+
+        // 处理说明由 ApplyNotes 根据格式包内容生成，不再是四行静态文本。
+        _applyNotes.AutoSize = false;
+        _applyNotes.SetBounds(22, 230, 405, 180);
+        _applyNotes.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
 
         card.Controls.Add(title);
         card.Controls.Add(_applyPageLayout);
         card.Controls.Add(layoutHint);
         card.Controls.Add(_demoteHeadings);
         card.Controls.Add(demoteHint);
+        card.Controls.Add(demoteNote);
         card.Controls.Add(divider);
-        card.Controls.Add(preserved);
+        card.Controls.Add(_applyNotes);
         return card;
     }
 
@@ -757,7 +865,7 @@ internal sealed partial class MainForm
         _libraryList.Controls.Clear();
         if (_packs.Count == 0)
         {
-            var empty = Theme.Label("还没有保存格式。\n\n导入一份 Word 样板后，它会出现在这里。", 9, color: Theme.MutedInk);
+            var empty = Theme.Label(UIStrings.Sidebar.Empty, 9, color: Theme.MutedInk);
             empty.AutoSize = false;
             empty.Size = new Size(250, 100);
             empty.Margin = new Padding(10, 18, 8, 0);
@@ -790,15 +898,14 @@ internal sealed partial class MainForm
         var name = Theme.Label(pack.Name, 10.5f, FontStyle.Bold, selected ? Theme.GreenDeep : Theme.Ink);
         name.AutoSize = false;
         name.SetBounds(14, 11, 195, 25);
-        var inferred = pack.InferredStyleCount ?? 0;
-        var detailText = inferred > 0
-            ? $"实际 {pack.UsedStyleCount} 种 · 补全 {inferred} 种"
-            : $"实际使用 {pack.UsedStyleCount} 种格式";
+        var detailText = pack.InferredCount > 0
+            ? UIStrings.Sidebar.PackSummaryWithInferred(pack.UsedStyleCount.ToString(), pack.InferredCount.ToString())
+            : UIStrings.Sidebar.PackSummary(pack.UsedStyleCount.ToString());
         var detail = Theme.Label(detailText, 8.25f, color: Theme.MutedInk);
         detail.Location = new Point(15, 43);
         var date = Theme.Label(pack.CreatedDisplay, 8, color: Theme.MutedInk);
         date.Location = new Point(15, 69);
-        var delete = Theme.TextButton("删除");
+        var delete = Theme.TextButton(UIStrings.Sidebar.DeleteButton);
         delete.AutoSize = false;
         delete.Size = new Size(50, 30);
         delete.Location = new Point(202, 60);
@@ -819,35 +926,81 @@ internal sealed partial class MainForm
     private void PopulatePreview(PackManifest pack)
     {
         _previewTitle.Text = pack.Name;
-        var inferred = pack.InferredStyleCount ?? 0;
-        var hidden = pack.HiddenStyleCount ?? Math.Max(0, (pack.DefinedStyleCount ?? pack.UsedStyleCount) - pack.UsedStyleCount);
-        _previewSummary.Text = inferred > 0
-            ? $"展示实际使用格式，以及按标题层级逻辑智能补全的 {inferred} 种格式；另有 {hidden} 个未使用样式已隐藏。"
-            : $"只展示文档中实际使用的格式；另有 {hidden} 个未使用样式已隐藏。";
-        _statsLabel.Text = $"实际使用 {pack.UsedStyleCount} 种  ·  段落 {pack.DocumentSummary.ParagraphCount}  ·  表格 {pack.DocumentSummary.TableCount}  ·  节 {pack.DocumentSummary.SectionCount}";
+        _previewSummary.Text = pack.InferredCount > 0
+            ? UIStrings.PreviewStep.SummaryWithInferred(pack.InferredCount.ToString(), pack.HiddenCount.ToString())
+            : UIStrings.PreviewStep.Summary(pack.HiddenCount.ToString());
+        _statsLabel.Text = string.Join("  ·  ", new[]
+        {
+            $"{UIStrings.PreviewStep.StatFormatsUsed} {pack.UsedStyleCount}",
+            $"{UIStrings.PreviewStep.StatParagraphs} {pack.DocumentSummary.ParagraphCount}",
+            $"{UIStrings.PreviewStep.StatTables} {pack.DocumentSummary.TableCount}",
+            $"{UIStrings.PreviewStep.StatSections} {pack.DocumentSummary.SectionCount}"
+        });
 
         var warnings = new List<string>();
         if (pack.ManualFormatting.ParagraphCount > 0 || pack.ManualFormatting.RunCount > 0)
         {
-            warnings.Add($"发现 {pack.ManualFormatting.ParagraphCount} 个手工设置段落、{pack.ManualFormatting.RunCount} 处手工字符格式");
+            warnings.Add(UIStrings.PreviewStep.ManualNotice(
+                pack.ManualFormatting.ParagraphCount.ToString(),
+                pack.ManualFormatting.RunCount.ToString()));
         }
+
         if (pack.HeadingNumberingConflicts is { Count: > 0 })
         {
-            warnings.Add($"{pack.HeadingNumberingConflicts.Count} 个标题样式存在多套编号");
+            warnings.Add(UIStrings.PreviewStep.NumberingConflict(pack.HeadingNumberingConflicts.Count.ToString()));
         }
+
         if (pack.HeadingCompletionWarnings is { Count: > 0 })
         {
             warnings.AddRange(pack.HeadingCompletionWarnings.Take(1));
         }
-        _warningLabel.Text = warnings.Count > 0 ? "提示：" + string.Join("；", warnings) : "格式结构完整，可以继续应用到目标文档。";
+
+        _warningLabel.Text = warnings.Count > 0
+            ? string.Join(UIStrings.Success.WarningSeparator, warnings)
+            : UIStrings.PreviewStep.StructureOk;
         _warningLabel.ForeColor = warnings.Count > 0 ? Theme.Amber : Theme.Success;
 
-        _applyPackTitle.Text = $"将应用：{pack.Name}";
-        _applyPackSummary.Text = inferred > 0
-            ? $"包含 {pack.UsedStyleCount} 种实际格式 + {inferred} 种智能补全标题"
-            : $"包含 {pack.UsedStyleCount} 种实际使用格式";
-        _formatFilter.SelectedIndex = 0;
+        _applyPackTitle.Text = UIStrings.ApplyStep.PackTitle(pack.Name);
+        _applyPackSummary.Text = pack.InferredCount > 0
+            ? UIStrings.ApplyStep.PackSummaryWithInferred(pack.UsedStyleCount.ToString(), pack.InferredCount.ToString())
+            : UIStrings.ApplyStep.PackSummary(pack.UsedStyleCount.ToString());
+        _applyNotes.Text = string.Join("\n\n", ApplyNotes.For(pack).Select(note => "✓ " + note));
+
+        UpdatePageLayoutPanel(pack.PageLayout);
+        RefreshFilterOptions(pack);
         PopulateFormatsGrid();
+    }
+
+    /// <summary>
+    /// 筛选器带上每类的数量，与 Mac 端的 Pill 一致。
+    /// </summary>
+    private void RefreshFilterOptions(PackManifest pack)
+    {
+        var previousIndex = _formatFilter.SelectedIndex;
+        _formatFilter.BeginUpdate();
+        _formatFilter.Items.Clear();
+        foreach (var option in FilterOptions)
+        {
+            var count = pack.UsedFormats.Count(option.Includes);
+            _formatFilter.Items.Add(UIStrings.Filters.WithCount(option.Title, count.ToString()));
+        }
+
+        _formatFilter.EndUpdate();
+        _formatFilter.SelectedIndex = previousIndex >= 0 && previousIndex < FilterOptions.Length
+            ? previousIndex
+            : 0;
+    }
+
+    private void UpdatePageLayoutPanel(PageLayout layout)
+    {
+        _pageOrientation.Text = FormatDisplay.Orientation(layout.Orientation);
+        _pageSize.Text = FormatDisplay.PageSize(layout);
+        _pageMarginVertical.Text = UIStrings.Inspector.PageMarginVertical(
+            FormatDisplay.Centimeters(layout.MarginTopCm),
+            FormatDisplay.Centimeters(layout.MarginBottomCm));
+        _pageMarginHorizontal.Text = UIStrings.Inspector.PageMarginHorizontal(
+            FormatDisplay.Centimeters(layout.MarginLeftCm),
+            FormatDisplay.Centimeters(layout.MarginRightCm));
     }
 
     private void PopulateFormatsGrid()
@@ -864,16 +1017,11 @@ internal sealed partial class MainForm
         _formatsGrid.Rows.Clear();
         foreach (var format in formats)
         {
-            var usage = format.Inferred == true ? "智能补全" : $"用过 {format.UsageCount} 次";
-            var font = string.Join(" / ", new[]
-            {
-                format.FontEastAsia ?? format.FontLatin ?? "继承字体",
-                format.SizePt.HasValue ? $"{format.SizePt:0.##} pt" : "继承字号"
-            });
-            var numbering = format.Numbered
-                ? format.NumberingExample ?? format.NumberingPattern ?? "自动编号"
-                : "—";
-            var index = _formatsGrid.Rows.Add(format.Name, usage, font, numbering);
+            var index = _formatsGrid.Rows.Add(
+                format.Name,
+                FormatDisplay.Usage(format),
+                FormatDisplay.FontSummary(format),
+                FormatDisplay.NumberingCell(format));
             _formatsGrid.Rows[index].Tag = format;
             if (format.Inferred == true)
             {
@@ -889,20 +1037,19 @@ internal sealed partial class MainForm
         }
         else
         {
-            _formatProperties.Text = "这一类没有被使用的格式。";
+            _formatProperties.Text = UIStrings.PreviewStep.EmptyList;
         }
     }
 
     private bool FormatMatchesFilter(UsedFormat format)
     {
-        return (_formatFilter.SelectedItem as string) switch
+        var index = _formatFilter.SelectedIndex;
+        if (index < 0 || index >= FilterOptions.Length)
         {
-            "标题" => format.Type == "paragraph" && format.OutlineLevel.HasValue,
-            "正文与段落" => format.Type == "paragraph" && !format.OutlineLevel.HasValue,
-            "字符" => format.Type == "character",
-            "表格" => format.Type == "table",
-            _ => true
-        };
+            return true;
+        }
+
+        return FilterOptions[index].Includes(format);
     }
 
     private void UpdateFormatInspector()
@@ -915,83 +1062,46 @@ internal sealed partial class MainForm
         var builder = new StringBuilder();
         builder.AppendLine(format.Name);
         builder.AppendLine(new string('─', 22));
-        AddProperty(builder, "类型", TypeDisplay(format.Type));
-        AddProperty(builder, "来源", format.Inferred == true ? format.InferenceLabel ?? "智能补全" : $"实际使用 {format.UsageCount} 次");
-        AddProperty(builder, "中文字体", format.FontEastAsia);
-        AddProperty(builder, "西文字体", format.FontLatin);
-        AddProperty(builder, "字号", format.SizePt.HasValue ? $"{format.SizePt:0.##} pt" : null);
-        var shape = string.Join("、", new[]
-        {
-            format.Bold == true ? "粗体" : null,
-            format.Italic == true ? "斜体" : null
-        }.Where(value => value is not null));
-        AddProperty(builder, "字形", string.IsNullOrWhiteSpace(shape) ? null : shape);
-        AddProperty(builder, "颜色", string.IsNullOrWhiteSpace(format.ColorHex) ? null : $"#{format.ColorHex}");
+        AddProperty(builder, UIStrings.Inspector.LabelType, FormatDisplay.Type(format));
+        AddProperty(builder, UIStrings.Inspector.LabelSource, FormatDisplay.Source(format));
+        AddProperty(builder, UIStrings.Inspector.LabelFontEastAsia, FormatDisplay.Optional(format.FontEastAsia));
+        AddProperty(builder, UIStrings.Inspector.LabelFontLatin, FormatDisplay.Optional(format.FontLatin));
+        AddProperty(builder, UIStrings.Inspector.LabelSize, FormatDisplay.Size(format.SizePt));
+        AddProperty(builder, UIStrings.Inspector.LabelTraits, FormatDisplay.Traits(format));
+        AddProperty(builder, UIStrings.Inspector.LabelColor, FormatDisplay.Hex(format.ColorHex));
         if (format.Type == "paragraph")
         {
-            AddProperty(builder, "对齐", AlignmentDisplay(format.Alignment));
-            AddProperty(builder, "段前 / 段后", format.SpaceBeforePt.HasValue || format.SpaceAfterPt.HasValue
-                ? $"{format.SpaceBeforePt ?? 0:0.##} / {format.SpaceAfterPt ?? 0:0.##} pt"
-                : null);
-            AddProperty(builder, "行距", format.LineSpacing.HasValue ? $"{format.LineSpacing:0.##} ({format.LineRule ?? "自动"})" : format.LineRule);
-            AddProperty(builder, "大纲级别", format.OutlineLevel.HasValue ? $"标题 {format.OutlineLevel + 1}" : null);
-            AddProperty(builder, "编号", format.Numbered ? format.NumberingExample ?? format.NumberingPattern ?? "自动编号" : "无");
+            AddProperty(builder, UIStrings.Inspector.LabelAlignment, FormatDisplay.Alignment(format.Alignment));
+            AddProperty(builder, UIStrings.Inspector.LabelSpacing, FormatDisplay.Spacing(format));
+            AddProperty(builder, UIStrings.Inspector.LabelLineSpacing, FormatDisplay.LineSpacing(format));
+            if (format.OutlineLevel.HasValue)
+            {
+                AddProperty(
+                    builder,
+                    UIStrings.Inspector.LabelOutline,
+                    UIStrings.Inspector.OutlineValue((format.OutlineLevel.Value + 1).ToString()));
+            }
+
+            AddProperty(builder, UIStrings.Inspector.LabelNumbering, FormatDisplay.Numbering(format));
         }
         else if (format.Type == "table")
         {
-            AddProperty(builder, "表格底色", string.IsNullOrWhiteSpace(format.TableFillHex) ? null : $"#{format.TableFillHex}");
-            AddProperty(builder, "强调色", string.IsNullOrWhiteSpace(format.TableAccentHex) ? null : $"#{format.TableAccentHex}");
-        }
-
-        if (_selectedPack is not null)
-        {
-            var page = _selectedPack.PageLayout;
-            builder.AppendLine();
-            builder.AppendLine("页面设置");
-            builder.AppendLine(new string('─', 22));
-            AddProperty(builder, "方向", page.Orientation == "landscape" ? "横向" : page.Orientation == "portrait" ? "纵向" : page.Orientation);
-            AddProperty(builder, "纸张", page.WidthCm.HasValue && page.HeightCm.HasValue ? $"{page.WidthCm:0.##} × {page.HeightCm:0.##} cm" : null);
-            AddProperty(builder, "页边距", page.MarginTopCm.HasValue
-                ? $"上 {page.MarginTopCm:0.##}  下 {page.MarginBottomCm:0.##}\n左 {page.MarginLeftCm:0.##}  右 {page.MarginRightCm:0.##} cm"
-                : null);
+            AddProperty(builder, UIStrings.Inspector.LabelTableFill, FormatDisplay.Hex(format.TableFillHex));
+            AddProperty(builder, UIStrings.Inspector.LabelTableAccent, FormatDisplay.Hex(format.TableAccentHex));
         }
 
         _formatProperties.Text = builder.ToString().TrimEnd();
     }
 
-    private static void AddProperty(StringBuilder builder, string name, string? value)
+    private static void AddProperty(StringBuilder builder, string name, string value)
     {
-        builder.Append(name).Append("：").AppendLine(string.IsNullOrWhiteSpace(value) ? "继承 / 未指定" : value);
+        builder.Append(name).Append('：').AppendLine(value);
         builder.AppendLine();
     }
 
-    private static string TypeDisplay(string type) => type switch
-    {
-        "paragraph" => "段落样式",
-        "character" => "字符样式",
-        "table" => "表格样式",
-        _ => type
-    };
-
-    private static string? AlignmentDisplay(string? value) => value switch
-    {
-        "left" => "左对齐",
-        "center" => "居中",
-        "right" => "右对齐",
-        "both" => "两端对齐",
-        "distribute" => "分散对齐",
-        _ => value
-    };
-
     private void NavigateToStep(int step)
     {
-        if (step == 1)
-        {
-            ShowStep(1);
-            return;
-        }
-
-        if (_selectedPack is null)
+        if (step == 1 || _selectedPack is null)
         {
             ShowStep(1);
             return;
@@ -1017,7 +1127,24 @@ internal sealed partial class MainForm
             _stepNumbers[index].BackColor = active ? Theme.Green : Color.FromArgb(231, 235, 232);
             _stepNumbers[index].ForeColor = active ? Color.White : available ? Theme.MutedInk : Color.LightGray;
             _stepTitles[index].ForeColor = active ? Theme.GreenDeep : available ? Theme.MutedInk : Color.LightGray;
+            _stepSubtitles[index].ForeColor = available ? Theme.MutedInk : Color.LightGray;
         }
+    }
+
+    private void ShowToast(string message)
+    {
+        _toastLabel.Text = message;
+        _toastPanel.Visible = true;
+    }
+
+    /// <summary>「换一套格式」的落点：闪一下常驻格式库，而不是弹文件对话框。</summary>
+    private void HighlightLibrary()
+    {
+        _libraryList.Focus();
+        _libraryHighlight.Visible = true;
+        _libraryHighlight.BringToFront();
+        _highlightTimer.Stop();
+        _highlightTimer.Start();
     }
 
     private void SetBusy(bool busy, string message = "")

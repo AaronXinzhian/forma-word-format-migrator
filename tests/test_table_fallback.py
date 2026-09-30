@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, json, sys, tempfile, unittest, zipfile, pathlib, typing, lxml, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, NS, read_zip(), document_root(), table_structure(), canonical_nodes(), table_style_node(), default_table_style(), TableFallbackTests
+# [POS]: 验证无表格模板下目标表格结构与样式保留
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Regression coverage for targets with tables and table-free style sources."""
 
 from __future__ import annotations

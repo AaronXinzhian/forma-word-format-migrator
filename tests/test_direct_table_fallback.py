@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, copy, sys, tempfile, unittest, zipfile, pathlib, lxml, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, NS, read_zip(), canonical_nodes(), DirectTableFallbackTests
+# [POS]: 验证直接迁移在模板无表格时保留目标表格
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Direct-transfer coverage for table-free sources and non-body tables."""
 
 from __future__ import annotations

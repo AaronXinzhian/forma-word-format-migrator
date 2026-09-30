@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, copy, json, shutil, sys, tempfile, unittest, zipfile, pathlib, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, synthetic_info(), write_pack_with_manifest(), StylePackInputLimitTests
+# [POS]: 验证格式包清单及编辑输入的资源限制
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Pre-decompression safety checks for persistent .wfstyle files."""
 
 from __future__ import annotations

@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 AppKit, Foundation
+ * [OUTPUT]: 提供 roundedRect
+ * [POS]: 生成 Mac 应用品牌图标及图标集
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 import AppKit
 import Foundation
 

@@ -1,0 +1,287 @@
+{
+  "_readme": [
+    "Forma 赋式 双端界面文案的唯一来源。",
+    "",
+    "改文案只改这个文件，然后运行 scripts/gen_ui_strings.py 重新生成两端常量：",
+    "  swift-app/Generated/UIStrings.swift",
+    "  windows-app/FormaFushi.Windows/Generated/UIStrings.g.cs",
+    "生成物不要手工编辑，CI 会校验它们与本文件同步。",
+    "",
+    "写法：",
+    "  \"key\": \"文案\"                                共用文案，两端完全一致",
+    "  \"key\": { \"mac\": \"…\", \"windows\": \"…\" }      平台惯例差异，必须两个键都写",
+    "  \"{name}\" 形式的占位符会生成带参数的函数，参数一律是字符串。",
+    "",
+    "平台差异只允许用于系统术语（废纸篓/回收站、Finder/文件夹）这类真正的平台惯例，",
+    "不允许用来放任两端表达随意漂移。"
+  ],
+
+  "app": {
+    "windowTitle": "Forma 赋式｜Word 文档格式引擎",
+    "brand": "Forma 赋式",
+    "slogan": "一份范本，万卷同式。",
+    "libraryCount": "本机已保存 {count} 套",
+    "errorTitle": "操作没有完成",
+    "errorConfirm": "好",
+    "exitBusyTitle": "退出 Forma 赋式",
+    "exitBusyMessage": "文档仍在处理中。确定要退出吗？",
+    "exitBusyConfirm": "仍要退出",
+    "exitBusyCancel": "继续等待"
+  },
+
+  "steps": {
+    "importTitle": "导入格式源",
+    "importSubtitle": "保存到本机",
+    "previewTitle": "查看已用格式",
+    "previewSubtitle": "确认样式与页面",
+    "applyTitle": "应用到文档",
+    "applySubtitle": "另存为新文件"
+  },
+
+  "sidebar": {
+    "title": "我的格式库",
+    "hint": "保存后无需重复上传样板",
+    "importButton": "导入新的格式源",
+    "refreshButton": "刷新格式库",
+    "empty": "还没有保存格式。\n\n导入一份 Word 样板后，它会出现在这里。",
+    "readErrorNotice": "有 {count} 个格式库文件无法读取，已自动跳过。",
+    "packSummaryWithInferred": "实际 {used} 种 · 智能补全 {inferred} 种",
+    "packSummary": "实际使用 {used} 种格式",
+    "packDateUnknown": "已保存",
+    "deleteButton": "删除"
+  },
+
+  "deletion": {
+    "confirmTitle": "移除“{name}”？",
+    "confirmMessage": {
+      "mac": "只会把本机保存的这套格式方案移到废纸篓，不会删除原来的样板 Word 文件，也不会影响已经生成的文档。",
+      "windows": "只会把本机保存的这套格式方案移到回收站，不会删除原来的样板 Word 文件，也不会影响已经生成的文档。"
+    },
+    "confirmPrimary": {
+      "mac": "移到废纸篓",
+      "windows": "移到回收站"
+    },
+    "confirmCancel": "取消",
+    "busy": {
+      "mac": "正在将“{name}”移到废纸篓…",
+      "windows": "正在将“{name}”移到回收站…"
+    },
+    "done": {
+      "mac": "已将“{name}”移到废纸篓，需要时可以恢复。",
+      "windows": "已将“{name}”移到回收站，需要时可以恢复。"
+    }
+  },
+
+  "importStep": {
+    "eyebrow": "第一步 · 格式样板",
+    "title": "先选择一份“格式样板”",
+    "subtitle": "程序只提取格式系统，不保存文档正文、页眉页脚文字或批注内容。",
+    "chooseButton": "选择 Word 格式源",
+    "dropHint": "也可以把文件拖到这里",
+    "supportedFormats": "支持 DOCX、DOCM、DOTX、DOTM",
+    "infoTitle": "一次导入，反复使用",
+    "info1": "只展示文档里真正用过的格式",
+    "info2": "保存标题编号、字体、段落与页面设置",
+    "info3": "模板不含表格样式时，保留目标表格并清掉两字符首行缩进",
+    "savedToast": "“{name}”已保存到本机格式库。"
+  },
+
+  "filePicker": {
+    "sourceTitle": "选择 Word 格式源",
+    "sourcePrompt": "导入格式",
+    "targetTitle": "选择要修改格式的 Word 文件",
+    "targetPrompt": "选择目标文件",
+    "saveTitle": "保存应用格式后的 Word 文件",
+    "savePrompt": "应用并保存",
+    "outputSuffix": "-已套用格式",
+
+    "_filterNote": [
+      "以下四条是 Windows 通用对话框的类型过滤器写法（“说明|通配符”）。",
+      "macOS 用 UTType 表达同样的限制，因此只有 Windows 端会引用它们；",
+      "放在这里是为了让文件类型的中文说法也集中在同一份文案来源里。"
+    ],
+    "sourceFilter": "Word 格式源 (*.docx;*.docm;*.dotx;*.dotm)|*.docx;*.docm;*.dotx;*.dotm",
+    "targetFilter": "Word 文档 (*.docx;*.docm)|*.docx;*.docm",
+    "outputFilterDocx": "Word 文档 (*.docx)|*.docx",
+    "outputFilterDocm": "启用宏的 Word 文档 (*.docm)|*.docm"
+  },
+
+  "previewStep": {
+    "summaryWithInferred": "展示实际使用格式，以及按标题层级逻辑智能补全的 {inferred} 种格式；另有 {hidden} 个未使用样式已隐藏。",
+    "summary": "只展示文档中实际使用的格式；另有 {hidden} 个未使用样式已隐藏。",
+    "nextButton": "下一步：选择目标文档",
+    "switchPackButton": "换一套格式",
+    "listTitle": "文档中使用的格式",
+    "emptyList": "这一类没有被使用的格式。",
+    "privacy": "格式方案仅保存在这台电脑上，可从格式库随时删除。",
+    "statFormatsUsed": "实际使用",
+    "statFormatsBoth": "实际 + 补全",
+    "statParagraphs": "段落",
+    "statTables": "表格",
+    "statSections": "节",
+    "manualNotice": "发现 {paragraphs} 个手工设置段落、{runs} 处手工字符格式。它们不是可复用样式，因此不会出现在下方列表中；应用时会清理目标文档的手工视觉格式。",
+    "numberingConflict": "检测到 {count} 个标题样式使用多套编号；将采用最常用规则，请在生成后检查章节重启。",
+    "structureOk": "格式结构完整，可以继续应用到目标文档。"
+  },
+
+  "filters": {
+    "all": "全部",
+    "headings": "标题",
+    "paragraphs": "正文与段落",
+    "characters": "字符",
+    "tables": "表格",
+    "withCount": "{name} {count}"
+  },
+
+  "formatList": {
+    "columnName": "格式",
+    "columnUsage": "来源",
+    "columnFont": "字体 / 字号",
+    "columnNumbering": "编号示意",
+    "usageInferred": "智能补全",
+    "usageCount": "用过 {count} 次",
+    "inheritFont": "继承字体",
+    "inheritSize": "继承字号",
+    "badgeHeading": "标题",
+    "badgeParagraph": "段落",
+    "badgeCharacter": "字符",
+    "badgeTable": "表格"
+  },
+
+  "inspector": {
+    "title": "格式属性",
+    "empty": "选择一张格式卡片查看详细属性。",
+    "inherit": "继承 / 未指定",
+    "labelType": "类型",
+    "labelSource": "来源",
+    "labelFontEastAsia": "中文字体",
+    "labelFontLatin": "西文字体",
+    "labelSize": "字号",
+    "labelTraits": "字形",
+    "labelColor": "颜色",
+    "labelAlignment": "对齐",
+    "labelSpacing": "段前 / 段后",
+    "labelLineSpacing": "行距",
+    "labelOutline": "大纲级别",
+    "labelNumbering": "编号",
+    "labelTableFill": "表格底色",
+    "labelTableAccent": "强调色",
+    "sourceUsedCount": "实际使用 {count} 次",
+    "typeHeading": "{level} 级标题",
+    "typeParagraph": "段落样式",
+    "typeCharacter": "字符样式",
+    "typeTable": "表格样式",
+    "traitBold": "粗体",
+    "traitItalic": "斜体",
+    "traitRegular": "常规",
+    "traitSeparator": "、",
+    "alignLeft": "左对齐",
+    "alignCenter": "居中",
+    "alignRight": "右对齐",
+    "alignJustify": "两端对齐",
+    "alignDistribute": "分散对齐",
+    "spacingValue": "{before} / {after} pt",
+    "sizeValue": "{size} pt",
+    "lineSpacingMultiple": "{value} 倍",
+    "lineSpacingExact": "{value} pt",
+    "outlineValue": "{level} 级",
+    "numberingWithExample": "自动编号（示意：{example}）",
+    "numberingPlain": "自动编号",
+    "numberingNone": "无",
+    "pageTitle": "页面设置",
+    "pageOrientationLandscape": "横向",
+    "pageOrientationPortrait": "纵向",
+    "pageLabelSize": "纸张",
+    "pageLabelMargins": "页边距",
+    "pageSizeValue": "{width} × {height} cm",
+    "pageSizeDefault": "使用文档默认页面",
+    "pageMarginVertical": "上 / 下：{top} / {bottom}",
+    "pageMarginHorizontal": "左 / 右：{left} / {right}",
+    "centimeterValue": "{value} cm"
+  },
+
+  "applyStep": {
+    "title": "最后，选择要修改的 Word 文件",
+    "subtitle": "原文件不会被覆盖；处理结果会另存为一个新文件。",
+    "backButton": "返回检查格式",
+    "packTitle": "将应用：{name}",
+    "packSummaryWithInferred": "包含 {used} 种实际格式 + {inferred} 种智能补全标题",
+    "packSummary": "包含 {used} 种实际使用格式",
+    "changePackButton": "更换",
+    "targetTitle": "目标 Word 文件",
+    "targetEmptyTitle": "上传要修改格式的 Word 文件",
+    "targetEmptyHint": "支持 DOCX 与保留宏的 DOCM",
+    "targetDropHint": "也可以把文件拖到这里",
+    "chooseTargetButton": "选择目标文件",
+    "changeTargetButton": "更换目标文件",
+    "optionsTitle": "应用选项",
+    "optionPageLayout": "同步格式源的页面设置",
+    "optionPageLayoutHint": "包含纸张、方向与页边距",
+    "optionDemote": "所有标题向下调整一级",
+    "optionDemoteHint": "标题一→标题二，标题八→标题九",
+    "optionDemoteNote": "标题九受 Word 上限保持不变；若再次对已处理文件勾选，会再向下一级。",
+    "noteKeepContent": "保留正文、图片、表格结构与页眉页脚内容",
+    "noteCleanup": "清理旧样式与手工视觉格式",
+    "noteInferredHeadings": "用标题一至标题三的设计逻辑补全标题四、标题五",
+    "noteSaveAsNew": "始终另存为新文件",
+    "noteNumbering": "同步标题多级编号，例如 1、1.1、1.1.1",
+    "noteManualPrefix": "自动清理与层级计数一致的手工序号，例如“第三章”“3.1”",
+    "noteTableFallback": "格式库没有表格样式：保留表格外观，并用稳定样式取消单元格的两字符首行缩进",
+    "applyButton": "选择保存位置并应用",
+    "applyAgainButton": "重新生成"
+  },
+
+  "success": {
+    "title": "格式已经应用完成",
+    "warnings": "请留意：{details}",
+    "warningSeparator": "；",
+    "openButton": "打开结果",
+    "revealButton": {
+      "mac": "在 Finder 中显示",
+      "windows": "在文件夹中显示"
+    },
+    "nextButton": "处理下一份"
+  },
+
+  "emptySelection": {
+    "title": "还没有选择格式库",
+    "action": "返回导入"
+  },
+
+  "busy": {
+    "loadingLibrary": "正在读取本机格式库…",
+    "importing": "正在识别文档中实际使用的格式…",
+    "applying": "正在清理旧格式并应用“{name}”…"
+  },
+
+  "errors": {
+    "unsupportedSource": "请选择 .docx、.docm、.dotx 或 .dotm 格式的 Word 文件。",
+    "unsupportedTarget": "目标文件只支持 .docx 或 .docm。",
+    "missingSelection": "请先选择格式库和要修改的 Word 文件。",
+    "extensionMismatch": "输出文件必须与目标文件保持相同扩展名。",
+    "sameAsTarget": "为保护原文件，请另存为一个新文件。",
+    "packMissingInfo": "格式已读取，但没有返回可展示的信息。",
+    "outputMissing": "生成的文件已经移动或删除。",
+    "openFailed": "无法打开生成的文件：{detail}",
+    "revealFailed": "无法在文件夹中显示结果：{detail}",
+    "packNotInLibrary": "这套格式已不在当前格式库中，请刷新后重试。",
+    "packWithoutPath": "这套格式缺少本机存储位置，无法删除。",
+    "packOutsideLibrary": "为保护其他文件，只能删除格式库目录中的 .wfstyle 格式方案。",
+    "packEscapesLibrary": "检测到格式方案指向格式库以外的位置，已停止删除。",
+    "packNotRegularFile": "为保护其他内容，只能删除普通的 .wfstyle 格式库文件。",
+    "packMissingFile": "这套格式文件已经不存在，请刷新格式库。",
+    "emptyResult": "文档处理组件没有返回结果。",
+    "unreadableResult": "无法读取文档处理结果。",
+    "unreadableResultDetail": "无法读取文档处理结果：{detail}",
+    "transferFailedDetail": "文档处理失败：{detail}",
+    "transferFailed": "文档处理失败。",
+    "managerExit": "文档处理组件异常退出。",
+    "managerMissing": "应用资源不完整：找不到 style_pack_manager.py。请重新安装应用。",
+    "runtimeMissing": "应用资源不完整：找不到 Python 运行环境。请重新安装应用。",
+    "managerLaunchFailed": "无法启动文档处理组件：{detail}",
+    "managerLaunchFailedPlain": "无法启动文档处理组件。",
+    "unauthorized": "无法读取或写入所选位置，请选择“文档”或桌面等可写位置。",
+    "fileNotFound": "所选文件已被移动或删除，请重新选择。",
+    "fileLocked": "文件正在被 Word 或其他程序占用，请关闭文件后重试。"
+  }
+}

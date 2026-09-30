@@ -11,8 +11,8 @@ Forma 赋式把一个 Word 文档的标题、正文、标题多级编号、表�
 
 | 平台 | 当前源码版本 | 发布状态 |
 | --- | --- | --- |
-| macOS | 2.7.2 | SwiftUI 版已完成本地测试；正式公开安装包仍需 Developer ID 签名与 Apple 公证 |
-| Windows | 2.6.0 | 自包含 x64 便携版已通过构建与回归验证 |
+| macOS | 2.7.3 | 当前源码候选；本机开发包与正式签名、公证验收分开记录 |
+| Windows | 2.7.3 | 共享内核与 WinForms 基线；交叉构建不代表 Windows 运行验收 |
 
 ## 下载
 
@@ -22,7 +22,7 @@ Forma 赋式把一个 Word 文档的标题、正文、标题多级编号、表�
 
 1. Mac 双击 `Forma 赋式.app`；Windows 完整解压便携包后双击 `FormaFushi.exe`。选择一个 `.docx`、`.docm`、`.dotx` 或 `.dotm` 作为格式来源。
 2. 程序分析文档，展示其中**实际使用过**的段落样式、字符样式和表格样式；如果标题只实际使用到三级，还会按前三层的设计逻辑智能补全标题四、标题五。确认后，这套格式会保存到“我的格式库”；也可以在 Mac 版中打开“编辑格式方案”，调整标题与正文的字体、字号、粗体、颜色、段落对齐、间距、行距和缩进，以及表格底色与首行强调色。
-3. 选择需要修改格式的 `.docx` 或 `.docm`，指定新文件的保存位置，然后生成结果。
+3. 选择需要修改格式的 `.docx` 或 `.docm`，先查看真实目标预检（段落、标题、表格、字体及页面处理），再指定新文件保存位置。Mac 版只有预检有效时才能生成；模板、目标或选项变化后需重新预检。
 
 程序始终生成新文件，不会改写格式源或目标原文件。格式源在导入后可以移动或删除，已保存的格式方案仍可使用。
 
@@ -47,12 +47,15 @@ Mac 版可以在读取模板后直接编辑格式方案。编辑器一次可以�
 - 标题、正文和字符样式：中文字体、西文字体、字号、粗体和文字颜色。
 - 字体选择器：可搜索整份模板中实际使用的字体、macOS 已安装字体、本地化名称和 PostScript 名，并标明“已安装”“别名匹配”“本机未注册”或“匹配冲突”。模板原字体始终保留在列表中，即使它没有安装在当前 Mac 上。
 - 段落样式：对齐方式、段前/段后、单倍/最小值/固定值行距，以及按字符或磅设置的左右缩进、首行缩进和悬挂缩进；输入 `2 字符` 会保存为 Word 的真实字符缩进，不会在文本前插入空格。
-- 表格样式：表格基础底色与首行强调色。
+- 表格样式：表格基础底色、首行强调色、边框样式/颜色/宽度与上下左右单元格边距。
+- 标题编号：在已有编号规则上调整数字形式、层级标点模式、起始值和随上一级重启；只允许当前及上级占位符，不凭空生成缺失的编号体系。
 - 编号标题：修改标题字体后，对应序号标签会同步更新，避免标题文字与数字使用不同字体。
 
 如果模板没有实际使用表格，编辑器会额外显示一项“可选表格方案”。只有修改并保存这项方案后，它才会用于目标文档；保持不动时，程序仍保留目标表格原来的视觉样式，仅清理单元格里错误的两字符首行缩进。旧版同格式库也会在内存中获得这项编辑能力，不需要重新导入模板，原 `.wfstyle` 文件不会被悄悄改写。
 
 保存时始终派生一个新的 `.wfstyle` 文件，原格式方案不会被覆盖。派生方案会获得新的 ID、完整性校验和与格式指纹；如果不满意，可以删除新方案或继续使用原方案。编辑器修改的是可复用格式资产，不会反向改写原模板 Word 文档，也不会读取或保存模板正文。
+
+Mac 编辑器的“重置全部”需确认，并可撤销；切换字符/磅单位会清除旧单位覆盖值并明确提示，不把 2 字符误解释成 2 磅。格式库支持导入和导出 `.wfstyle`：先校验内容，重复规则复用已有方案，同 ID 不同规则拒绝覆盖。损坏方案会显示原因并提供 Finder 定位，不会静默丢失。
 
 字体预览会分别使用中文与西文字体。如果模板使用 Aptos、Calibri、Cambria 等可能仅由 Microsoft Word 提供、而未在 macOS 全局注册的字体，Forma 仍会原样保存 Word 字体名；只是程序内的示意预览会明确回退到系统字体。程序不会把 SimSun 等未安装字体擅自替换成 Songti SC 或其他外观相似的字体；最终呈现以打开生成文档的 Word 可用字体为准。
 
@@ -68,13 +71,15 @@ Mac 版可以在读取模板后直接编辑格式方案。编辑器一次可以�
 
 ```text
 # macOS
-~/Library/Application Support/WordFormatMigrator/style-packs/
+~/Library/Application Support/FormaFushi/style-packs/
 
 # Windows
 %LOCALAPPDATA%\FormaFushi\style-packs\
 ```
 
 每个 `.wfstyle` 文件只包含经过白名单处理的格式 XML 和预览索引：样式、主题颜色、字体名与别名映射、编号规则、部分格式设置与页面布局。它不会保存源文档正文、页眉页脚文字、批注、图片、宏、嵌入对象或字体文件；预览中的文字是程序生成的示例，不是源文档摘录。
+
+Mac 首次升级会安全迁移旧 `WordFormatMigrator` 目录；新旧目录同时存在时不覆盖，迁移失败时继续读取旧位置。加载外来格式包也会校验格式部件、关系类型、命名空间和内容钩子，拒绝正文、二进制及外部关系，即使其校验和正确。
 
 首次读取时，格式方案显示名称默认取源文件名；派生新方案时可以修改名称。磁盘文件名使用随机 ID，避免把敏感文档标题暴露在 Finder、备份或诊断路径中。自定义样式名称本身属于 Word 格式信息，会被保留。
 
@@ -144,16 +149,26 @@ python3 style_pack_manager.py apply-pack \
 运行全部文档处理回归测试：
 
 ```bash
+python3 -m venv build/forma-tests-venv
+build/forma-tests-venv/bin/python -m pip install -r requirements-dev.txt
+build/forma-tests-venv/bin/python scripts/gen_ui_strings.py --check
+build/forma-tests-venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+python3 scripts/check_project_docs.py --sync
+```
+
+仅运行已安装开发依赖环境中的回归测试也可使用：
+
+```bash
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 在 Mac 上构建同时支持 Apple Silicon 与 Intel 的签名应用和压缩包：
 
 ```bash
-./scripts/build_macos_app.sh
+FORMA_BUILD_PYTHON="$PWD/build/forma-tests-venv/bin/python" ./scripts/build_macos_app.sh
 ```
 
-Mac 构建会先运行全部 Python 与 Swift 安全测试，再下载并校验固定哈希的 Universal Python/lxml、执行双架构运行时和真实格式迁移 smoke test，最后生成 ZIP 与 SHA-256。日常开发构建可以使用本机临时签名；正式发布时设置：
+Mac 构建默认使用已验证的 SDK 26.5（可用 `FORMA_MACOS_SDK` 明确指定其他 SDK 并自行验收），先运行全部 Python 与 Swift 测试，再校验固定哈希的 Universal Python/lxml、执行双架构运行时和真实迁移 smoke，最后检查解压后的签名及运行路径，生成 ZIP、SHA-256 和源码来源清单。日常开发构建可以使用本机临时签名；正式发布需干净已提交源码并设置：
 
 ```bash
 MACOS_SIGNING_IDENTITY="Developer ID Application: …" \
@@ -172,8 +187,10 @@ FORMA_REQUIRE_NOTARIZATION=1 \
 ./scripts/build_windows_app.sh
 ```
 
-Windows 构建脚本会校验并组装固定版本的 .NET、Windows Embeddable Python 与 `lxml`，生成 UTF-8 文件名兼容的 ZIP 和 SHA-256。构建结果写入本机 `build/` 和 `outputs/`，不应提交到 Git。Mac 应用内部继续使用原有 bundle ID 和数据目录；两个平台继续使用相同的 `.wfstyle` 结构。
+交叉构建校验固定版本 .NET、Windows Embeddable Python 与 `lxml`，包名明确标记 `-local-crossbuild`；不能验证 Windows Python、SmartScreen 或实际 GUI。在 Windows PowerShell 7 中使用 `./scripts/build_windows_app.ps1` 执行本机发布、包内 Python、真实迁移和解压后重复 smoke。正式分发另需 `-RequireSigning`、签名证书及时间戳服务。CI 的 Windows 任务执行此原生门禁，但不自动创建 GitHub Release。
+
+构建结果写入本机 `build/` 和输出目录，不提交到 Git。源码来源清单记录提交、dirty 状态、实际工具链和逐文件 SHA-256，拒绝未解决合并；构建首尾输入必须一致。Mac 保留原有 bundle ID，两个平台继续使用相同 `.wfstyle` 结构。
 
 ## 许可证
 
-本仓库当前未附带开源许可证。仓库公开用于查看、审阅与协作，但不自动授予复制、修改或再分发代码的权利；后续如需采用 MIT、Apache-2.0 或其他许可证，将另行明确发布。
+本项目采用仓库现有 [MIT 许可证](LICENSE)。Python、lxml 与 .NET 等组件的许可另随包保留；本次修复不改变已发布主线的授权选择。

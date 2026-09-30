@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, copy, json, sys, tempfile, unittest, zipfile, pathlib, typing, lxml, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, NS, HEADING_TEXT, HEADING_STYLE_ID, REPORTED_LEFT_TWIPS, ABSENT_DIRECT_INDENT_CASES, qn(), read_zip(), write_zip(), remove_manifest_fields_from_pack(), xml(), style_for_id(), paragraph_for_text(), effective_style_left(), paragraph_numbering_reference(), active_numbering_level(), effective_word_left(), canonical(), make_reported_source(), HeadingLeftIndentTests
+# [POS]: 验证模板标题段落缩进与编号定位的独立保真
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Regression coverage for numbered headings gaining a list-level left indent.
 
 The source of the reported 0.49-inch value is not the Heading 3 paragraph

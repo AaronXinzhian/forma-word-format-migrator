@@ -10,6 +10,11 @@ Supported source files: .docx, .docm, .dotx, .dotm
 Supported target/output files: .docx, .docm
 
 This utility intentionally never edits either input file in place.
+
+[INPUT]: 依赖 __future__, argparse, copy, hashlib, io, json, os, posixpath, re, sys, tempfile, zipfile, collections, dataclasses, pathlib, typing
+[OUTPUT]: 提供有界不可变输入快照、格式迁移、有效大纲解析、标题层级收集与安全输出接口
+[POS]: 文档格式引擎，保持目标内容语义并应用源样式、编号和页面布局
+[PROTOCOL]: 变更时更新此头部，然后检查上级 FOLDER_INDEX.md
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import io
 import json
 import os
 import posixpath
@@ -358,10 +364,38 @@ def _human_size(size: int) -> str:
     return "%d B" % size
 
 
-def load_package(path: Path, role: str) -> Package:
+def read_package_snapshot(
+    path: Path,
+    role: str,
+    max_bytes: int,
+    expected_sha256: Optional[str] = None,
+) -> bytes:
+    """Hash and parse one bounded immutable snapshot, not two pathname reads."""
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(max_bytes + 1)
+    except OSError as exc:
+        raise TransferError("无法读取%s：%s" % (role, exc)) from exc
+    if len(data) > max_bytes:
+        raise TransferError("%s压缩包体积过大，已停止读取。" % role)
+    if (
+        expected_sha256 is not None
+        and hashlib.sha256(data).hexdigest() != expected_sha256
+    ):
+        raise TransferError("%s在预检后发生变化，请重新预检。" % role)
+    return data
+
+
+def load_package(
+    path: Path, role: str, expected_sha256: Optional[str] = None
+) -> Package:
     if not path.exists():
         raise TransferError("%s不存在：%s" % (role, path))
-    if not zipfile.is_zipfile(str(path)):
+    data = read_package_snapshot(
+        path, role, MAX_PACKAGE_UNCOMPRESSED_BYTES + 16 * 1024 * 1024,
+        expected_sha256=expected_sha256,
+    )
+    if not zipfile.is_zipfile(io.BytesIO(data)):
         raise TransferError(
             "%s不是可处理的现代 Word 文件；如果是 .doc，请先在 Word 中另存为 .docx。"
             % role
@@ -370,7 +404,7 @@ def load_package(path: Path, role: str) -> Package:
     entries: Dict[str, bytes] = {}
     infos: Dict[str, zipfile.ZipInfo] = {}
     order: List[str] = []
-    with zipfile.ZipFile(str(path), "r") as archive:
+    with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
         member_list = archive.infolist()
         validate_package_members(member_list, role)
         bad = archive.testzip()
@@ -930,6 +964,63 @@ def collect_used_heading_styles(
                 style_id,
             ),
         )
+    return result
+
+
+def _direct_paragraph_outline_level(
+    paragraph_properties: Optional[etree._Element],
+) -> Optional[int]:
+    if paragraph_properties is None:
+        return None
+    value = _safe_int(
+        _word_value(paragraph_properties.find("w:outlineLvl", namespaces=NS))
+    )
+    return value if value is not None and 0 <= value <= 9 else None
+
+
+def paragraph_outline_level(
+    paragraph_properties: Optional[etree._Element],
+    catalog: StyleCatalog,
+) -> Optional[int]:
+    """Resolve semantic heading level, honoring direct Body Text overrides.
+
+    A legal direct outline setting overrides the paragraph style.  Word's
+    value 9 explicitly means Body Text and therefore stops inheritance from
+    a heading style; malformed values cannot create a heading.
+    """
+    direct = _direct_paragraph_outline_level(paragraph_properties)
+    if direct is not None:
+        return direct if direct <= 8 else None
+    style_id = (
+        _word_value(paragraph_properties.find("w:pStyle", namespaces=NS))
+        if paragraph_properties is not None
+        else None
+    ) or catalog.fallback("paragraph")
+    return catalog.resolved_outline.get(style_id or "")
+
+
+def collect_used_heading_levels(
+    entries: Dict[str, bytes],
+    catalog: StyleCatalog,
+    part_names: Optional[Iterable[str]] = None,
+) -> Set[int]:
+    """Collect actual target heading levels without inventing style authority."""
+    selected_parts = (
+        list(part_names)
+        if part_names is not None
+        else [name for name in sorted(entries) if is_content_part(name)]
+    )
+    result: Set[int] = set()
+    for name in selected_parts:
+        if name not in entries or not is_content_part(name):
+            continue
+        root = parse_xml(entries[name], name)
+        for paragraph in root.xpath("//w:p", namespaces=NS):
+            level = paragraph_outline_level(
+                paragraph.find("w:pPr", namespaces=NS), catalog
+            )
+            if level is not None:
+                result.add(level)
     return result
 
 
@@ -3682,21 +3773,41 @@ def clean_content_xml(
             if direct_num_pr is not None:
                 original_num_pr = copy.deepcopy(direct_num_pr)
             pstyle = ppr.find("w:pStyle", namespaces=NS)
-            if pstyle is not None:
-                old = pstyle.get(qn(W_NS, "val"))
-                target_outline = target_catalog.resolved_outline.get(old or "")
-                desired_outline = (
-                    min(8, target_outline + heading_level_shift)
-                    if target_outline is not None
-                    else None
-                )
-                new = map_style_id(
-                    old,
-                    "paragraph",
-                    target_catalog,
-                    source_catalog,
-                    heading_level_shift=heading_level_shift,
-                )
+            old = _word_value(pstyle)
+            direct_outline_level = _direct_paragraph_outline_level(ppr)
+            target_outline = paragraph_outline_level(ppr, target_catalog)
+            desired_outline = (
+                min(8, target_outline + heading_level_shift)
+                if target_outline is not None
+                else None
+            )
+            if pstyle is not None or target_outline is not None:
+                if direct_outline_level is not None and target_outline is not None:
+                    new = (
+                        source_catalog.authoritative_heading_by_level.get(desired_outline)
+                        or source_catalog.heading_by_level.get(desired_outline)
+                    )
+                    if new is None:
+                        raise TransferError(
+                            "格式库缺少标题%d，无法安全转换目标的大纲标题。"
+                            % (desired_outline + 1)
+                        )
+                elif direct_outline_level == 9:
+                    # Clearing an explicit Body Text override must not expose
+                    # the heading level inherited from the old paragraph style.
+                    new = map_style_id(
+                        old, "paragraph", target_catalog, source_catalog
+                    )
+                    if source_catalog.resolved_outline.get(new or "") is not None:
+                        new = source_catalog.fallback("paragraph")
+                else:
+                    new = map_style_id(
+                        old,
+                        "paragraph",
+                        target_catalog,
+                        source_catalog,
+                        heading_level_shift=heading_level_shift,
+                    )
                 if (
                     new
                     and heading_numbering
@@ -3715,7 +3826,7 @@ def clean_content_xml(
                 if new:
                     if new != old:
                         stats.styles_remapped += 1
-                    pstyle.set(qn(W_NS, "val"), new)
+                    _set_paragraph_style(ppr, new)
                     mapped_style_id = new
                     if target_outline is not None and heading_level_shift:
                         mapped_outline = source_catalog.resolved_outline.get(new)
@@ -3724,21 +3835,32 @@ def clean_content_xml(
                         elif mapped_outline == desired_outline:
                             stats.heading_levels_demoted += 1
                 else:
-                    ppr.remove(pstyle)
-            if target_outline is None:
-                direct_outline = ppr.find("w:outlineLvl", namespaces=NS)
-                direct_outline_level = _safe_int(
-                    _word_value(direct_outline)
-                )
+                    if pstyle is not None:
+                        ppr.remove(pstyle)
+                # Even a preserved table must not retain an old direct level
+                # which would override the newly mapped or demoted heading.
                 if (
-                    direct_outline_level is not None
-                    and 0 <= direct_outline_level <= 8
+                    mapped_style_id is not None
+                    and target_outline is not None
+                    and source_catalog.resolved_outline.get(mapped_style_id)
+                    == desired_outline
                 ):
-                    target_outline = direct_outline_level
+                    direct_outline = ppr.find("w:outlineLvl", namespaces=NS)
+                    if direct_outline is not None:
+                        ppr.remove(direct_outline)
+                        stats.paragraph_properties_removed += 1
             if not inside_preserved_table:
                 stats.paragraph_properties_removed += _remove_children_except(
                     ppr, {"pStyle", "sectPr"}
                 )
+            if direct_outline_level == 9:
+                # Explicit Body Text also overrides a same-ID source style
+                # or even a heading-valued template default paragraph style.
+                body_outline = ppr.find("w:outlineLvl", namespaces=NS)
+                if body_outline is None:
+                    body_outline = etree.Element(qn(W_NS, "outlineLvl"))
+                    _ordered_insert(ppr, body_outline, PPR_CHILD_ORDER)
+                body_outline.set(qn(W_NS, "val"), "9")
             rule = (
                 heading_numbering.get(mapped_style_id)
                 if heading_numbering is not None and mapped_style_id is not None
@@ -4441,22 +4563,8 @@ def materialize_target_body_numbering(
         changed = False
         for paragraph in root.xpath("//w:p", namespaces=NS):
             ppr = paragraph.find("w:pPr", namespaces=NS)
-            pstyle = (
-                _word_value(ppr.find("w:pStyle", namespaces=NS))
-                if ppr is not None
-                else None
-            )
-            outline = target_catalog.resolved_outline.get(pstyle or "")
-            direct_outline = (
-                _safe_int(
-                    _word_value(ppr.find("w:outlineLvl", namespaces=NS))
-                )
-                if ppr is not None
-                else None
-            )
-            if outline is not None or (
-                direct_outline is not None and 0 <= direct_outline <= 8
-            ):
+            outline = paragraph_outline_level(ppr, target_catalog)
+            if outline is not None:
                 continue
 
             effective, inherited = _effective_target_num_pr(
@@ -4499,16 +4607,11 @@ def _direct_content_num_ids(
             ppr = paragraph.find("w:pPr", namespaces=NS)
             if ppr is None:
                 continue
-            pstyle = _word_value(ppr.find("w:pStyle", namespaces=NS))
             outline = (
-                target_catalog.resolved_outline.get(pstyle or "")
+                paragraph_outline_level(ppr, target_catalog)
                 if target_catalog is not None
-                else None
+                else _direct_paragraph_outline_level(ppr)
             )
-            if outline is None:
-                outline = _safe_int(
-                    _word_value(ppr.find("w:outlineLvl", namespaces=NS))
-                )
             if outline is not None and 0 <= outline <= 8:
                 continue
             value = _word_value(ppr.find("w:numPr/w:numId", namespaces=NS))
@@ -5023,13 +5126,13 @@ def transfer(
     runtime_inferred_headings: Dict[int, str] = {}
     runtime_completion_warnings: List[str] = []
     if demote_headings:
-        target_heading_by_level = collect_used_heading_styles(
+        target_heading_levels = collect_used_heading_levels(
             target_entries,
             target_catalog,
             part_names=("word/document.xml",),
         )
         desired_heading_levels = {
-            min(8, level + 1) for level in target_heading_by_level
+            min(8, level + 1) for level in target_heading_levels
         }
         missing_heading_levels = sorted(
             desired_heading_levels.difference(source_heading_authority)

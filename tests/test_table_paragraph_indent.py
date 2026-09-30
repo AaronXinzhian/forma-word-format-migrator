@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, copy, sys, tempfile, unittest, zipfile, pathlib, lxml, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, NS, W_VAL, _CUSTOM_BODY_STYLE_SPECS, TableParagraphIndentTests
+# [POS]: 验证表格两字符首行缩进清理和重复应用稳定性
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Regression coverage for the table-only two-character indent cleanup."""
 
 from __future__ import annotations
@@ -1102,20 +1106,42 @@ class TableParagraphIndentTests(unittest.TestCase):
             )
 
     def test_inherited_indent_neutralization_skips_direct_outline_levels(self) -> None:
+        catalog = core.build_style_catalog(
+            core.serialize_xml(self.inherited_styles_root),
+            core.serialize_xml(self.inherited_root)
+        )
         for level, text in enumerate(self.direct_outline_texts):
             with self.subTest(level=level):
                 paragraph = _paragraph_for_text(self.inherited_root, text)
                 self.assertTrue(
                     paragraph.xpath("ancestor::w:tbl", namespaces=NS)
                 )
+                # Heading mapping may replace a direct outlineLvl with the
+                # template's real heading style.  Protect effective semantics,
+                # not the obsolete storage representation.
                 self.assertEqual(
-                    paragraph.xpath(
-                        "w:pPr/w:outlineLvl/@w:val", namespaces=NS
-                    ),
-                    [str(level)],
+                    core.paragraph_outline_level(
+                        paragraph.find("w:pPr", namespaces=NS), catalog
+                    ), level,
+                )
+                style_id = _paragraph_style_id(
+                    paragraph, self.inherited_styles_root
+                )
+                self.assertFalse(
+                    style_id.startswith(core.TABLE_NO_FIRST_LINE_STYLE_PREFIX)
                 )
                 self.assertFalse(
                     paragraph.xpath("w:pPr/w:ind", namespaces=NS)
+                )
+                second = _paragraph_for_text(self.inherited_second_root, text)
+                second_catalog = core.build_style_catalog(
+                    core.serialize_xml(self.inherited_second_styles_root),
+                    core.serialize_xml(self.inherited_second_root)
+                )
+                self.assertEqual(
+                    core.paragraph_outline_level(
+                        second.find("w:pPr", namespaces=NS), second_catalog
+                    ), level,
                 )
 
     def test_repeated_application_is_idempotent_for_table_indentation(self) -> None:

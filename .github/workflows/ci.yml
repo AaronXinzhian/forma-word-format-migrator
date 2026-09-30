@@ -1,0 +1,136 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shared-strings:
+    name: 界面文案单一来源同步性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.13'
+
+      # 生成物一旦被手工改过，这里就会红，避免有人绕开 shared/ui-strings.json 直接改两端常量。
+      - name: 校验生成的 UIStrings 与 shared/ui-strings.json 同步
+        run: python3 scripts/gen_ui_strings.py --check
+
+  python-tests:
+    name: 文档引擎回归 (${{ matrix.os }} / Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: '3.11'
+          - os: ubuntu-latest
+            python-version: '3.14'
+          - os: macos-latest
+            python-version: '3.13'
+          # Windows 引擎验证是必过门禁，不能用 experimental 隐藏失败。
+          - os: windows-latest
+            python-version: '3.14'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装依赖
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: 运行回归测试
+        shell: bash
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+  swift-checks:
+    name: Mac 客户端编译与行为测试
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: 收集 Swift 源文件
+        id: sources
+        run: |
+          echo "list=$(find swift-app -name '*.swift' | sort | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+      # 每个测试自带 @main，只能各编各的可执行文件。
+      - name: 编译并运行 Swift 行为测试
+        run: |
+          mkdir -p build/ci
+          sdk_path=$(xcrun --sdk macosx26.5 --show-sdk-path)
+          for suite_file in tests/*Tests.swift; do
+            suite=$(basename "$suite_file" .swift)
+            xcrun swiftc \
+              -sdk "$sdk_path" \
+              -parse-as-library \
+              -D WORD_FORMAT_LIBRARY_TESTING \
+              -target arm64-apple-macos13.0 \
+              -module-cache-path "build/ci/module-cache-${suite}" \
+              ${{ steps.sources.outputs.list }} \
+              "$suite_file" \
+              -o "build/ci/${suite}"
+            "./build/ci/${suite}"
+          done
+
+      - name: 交叉架构编译检查（Release 构型）
+        run: |
+          for target in arm64-apple-macos13.0 x86_64-apple-macos13.0; do
+            xcrun swiftc \
+              -sdk "$(xcrun --sdk macosx26.5 --show-sdk-path)" \
+              -O \
+              -parse-as-library \
+              -target "$target" \
+              -module-cache-path "build/ci/module-cache-${target}" \
+              ${{ steps.sources.outputs.list }} \
+              -o "build/ci/WordFormatLibrary-${target}"
+          done
+
+  windows-build:
+    name: Windows 客户端编译与删除策略测试
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: '10.0.302'
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.14'
+
+      - name: 安装测试依赖
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: 构建并实际验证 Windows 便携包
+        shell: pwsh
+        run: ./scripts/build_windows_app.ps1 -OutputDirectory build/ci-windows-output
+
+      - name: 保留验证包和运行证据
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-local-unsigned-verified
+          path: build/ci-windows-output/
+          if-no-files-found: error

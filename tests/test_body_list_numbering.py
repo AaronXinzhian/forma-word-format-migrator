@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, copy, tempfile, unittest, zipfile, pathlib, lxml, sys, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, NS, W_VAL, BodyListNumberingTests
+# [POS]: 验证正文列表、编号隔离、重启和图片项目符号保留
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Regression tests for target-owned body list numbering semantics."""
 
 from __future__ import annotations

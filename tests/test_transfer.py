@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, importlib.util, sys, tempfile, unittest, zipfile, pathlib, lxml
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, ENGINE, W_NS, R_NS, NS, qn(), read_zip(), xml(), paragraph_for_text(), semantic_xml(), style_node(), TransferEndToEndTests
+# [POS]: 验证真实 Word 迁移、CLI 与内容语义保留
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """End-to-end release-gate coverage for direct source/target transfer."""
 
 from __future__ import annotations

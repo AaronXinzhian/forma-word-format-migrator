@@ -1,4 +1,8 @@
 #!/bin/zsh
+# [INPUT]: 依赖 (未检出外部依赖)
+# [OUTPUT]: 提供双架构本地测试包或通过签名、公证门禁的 Mac 发行包
+# [POS]: 构建层-Mac 源码、运行时、行为测试与最终归档验证
+# [PROTOCOL]: 修改时更新此头部与 FOLDER_INDEX.md
 
 set -euo pipefail
 
@@ -25,6 +29,20 @@ sign_identity="${MACOS_SIGNING_IDENTITY:--}"
 notary_profile="${MACOS_NOTARY_PROFILE:-}"
 require_release="${FORMA_REQUIRE_NOTARIZATION:-0}"
 keep_build_root="${FORMA_KEEP_BUILD_ROOT:-0}"
+sdk_name="${FORMA_MACOS_SDK_NAME:-macosx26.5}"
+sdk_path="${FORMA_MACOS_SDK:-$(xcrun --sdk "$sdk_name" --show-sdk-path)}"
+swift_compiler="${FORMA_SWIFTC:-$(xcrun --find swiftc)}"
+sources=("$project_root"/swift-app/**/*.swift(N))
+if [[ ! -d "$sdk_path" || ! -x "$swift_compiler" || ${#sources} -eq 0 ]]; then
+  print -u2 "缺少受支持的 Swift 工具链、SDK 或源码。安装 SDK 26.5，或显式设置 FORMA_MACOS_SDK。"
+  exit 1
+fi
+source_commit=$(git -C "$project_root" rev-parse HEAD)
+source_dirty=$(git -C "$project_root" status --porcelain | wc -l | tr -d ' ')
+if [[ "$require_release" == "1" && "$source_dirty" != "0" ]]; then
+  print -u2 "正式发行必须来自已提交的干净源码。"
+  exit 1
+fi
 
 mkdir -p "$project_root/build" "$download_root" "$output_root"
 build_root=$(mktemp -d "$project_root/build/forma-fushi-${version}.XXXXXX")
@@ -107,7 +125,13 @@ function source_fingerprint() {
       print -r -- "style_pack_manager.py"
       print -r -- "word_style_transfer.py"
       print -r -- "swift-app/Info.plist"
-      print -r -- "swift-app/WordFormatLibraryApp.swift"
+      print -r -- "LICENSE"
+      print -r -- "requirements.txt"
+      print -r -- "requirements-dev.txt"
+      print -r -- "shared/ui-strings.json"
+      print -r -- "scripts/gen_ui_strings.py"
+      print -r -- "scripts/source_manifest.py"
+      find swift-app -type f -name '*.swift' -print
       print -r -- "build-assets/WordFormatIcon.icns"
       find tests -maxdepth 1 -type f \( \
         -name '*.py' -o -name '*.swift' \
@@ -129,8 +153,8 @@ if [[ ! -x "$build_python" ]]; then
   print -u2 "找不到用于构建测试的 Python：$build_python"
   exit 1
 fi
-if ! "$build_python" -c 'import lxml' >/dev/null 2>&1; then
-  print -u2 "构建测试环境缺少 lxml：$build_python"
+if ! "$build_python" -c 'import lxml, docx, PIL' >/dev/null 2>&1; then
+  print -u2 "构建测试环境缺少依赖：请用 $build_python -m pip install -r requirements-dev.txt"
   exit 1
 fi
 if [[ "$require_release" == "1" && ( "$sign_identity" == "-" || -z "$notary_profile" ) ]]; then
@@ -145,6 +169,7 @@ fi
 print "[1/8] 运行文档处理回归测试"
 (
   cd "$project_root"
+  "$build_python" scripts/gen_ui_strings.py --check
   "$build_python" -m unittest discover -s tests -p 'test_*.py' -v
 )
 
@@ -159,35 +184,40 @@ mkdir -p \
   "$resources_dir/runtime/bin" \
   "$release_root/第三方许可"
 
-print "[2/8] 编译并运行 Mac 删除安全测试"
-xcrun swiftc \
-  -D WORD_FORMAT_LIBRARY_TESTING \
-  -parse-as-library \
-  -module-cache-path "$build_root/module-cache-deletion-tests" \
-  "$project_root/swift-app/WordFormatLibraryApp.swift" \
-  "$project_root/tests/PackDeletionPolicyTests.swift" \
-  -o "$build_root/PackDeletionPolicyTests"
-"$build_root/PackDeletionPolicyTests"
+print "[2/8] 编译并运行 Mac 行为测试"
+for suite in "$project_root"/tests/*Tests.swift(N); do
+  suite_name=${suite:t:r}
+  "$swift_compiler" \
+    -sdk "$sdk_path" \
+    -target arm64-apple-macos13.0 \
+    -D WORD_FORMAT_LIBRARY_TESTING \
+    -parse-as-library \
+    -module-cache-path "$build_root/module-cache-${suite_name}" \
+    "${sources[@]}" "$suite" -o "$build_root/$suite_name"
+  "$build_root/$suite_name"
+done
 
 print "[3/8] 编译 Universal Mac 应用"
-xcrun swiftc \
+"$swift_compiler" \
+  -sdk "$sdk_path" \
   -O \
   -parse-as-library \
   -target arm64-apple-macos13.0 \
   -file-prefix-map "$project_root=." \
   -debug-prefix-map "$project_root=." \
   -module-cache-path "$build_root/module-cache-arm64" \
-  "$project_root/swift-app/WordFormatLibraryApp.swift" \
+  "${sources[@]}" \
   -o "$arm_dir/WordFormatLibrary"
 
-xcrun swiftc \
+"$swift_compiler" \
+  -sdk "$sdk_path" \
   -O \
   -parse-as-library \
   -target x86_64-apple-macos13.0 \
   -file-prefix-map "$project_root=." \
   -debug-prefix-map "$project_root=." \
   -module-cache-path "$build_root/module-cache-x86_64" \
-  "$project_root/swift-app/WordFormatLibraryApp.swift" \
+  "${sources[@]}" \
   -o "$intel_dir/WordFormatLibrary"
 
 lipo -create \
@@ -204,6 +234,7 @@ install -m 644 "$project_root/style_pack_manager.py" \
 install -m 644 "$project_root/word_style_transfer.py" \
   "$resources_dir/word_style_transfer.py"
 install -m 644 "$project_root/README.md" "$release_root/使用说明.md"
+install -m 644 "$project_root/LICENSE" "$release_root/LICENSE"
 
 print "[4/8] 组装固定版本的 Universal Python 与 lxml"
 download_verified "$python_pkg_url" "$python_pkg" "$python_pkg_hash"
@@ -350,6 +381,10 @@ else
 fi
 
 manifest="$release_root/构建信息.txt"
+"$build_python" "$project_root/scripts/source_manifest.py" \
+  --root "$project_root" --out "$release_root/source-manifest.json" \
+  --platform macOS --toolchain "$("$swift_compiler" --version)" \
+  --sdk "$(basename "$sdk_path")" --channel "$build_channel"
 /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$info_plist" | \
   awk -v version="$version" -v build="$build_number" \
       -v python="$python_version" -v lxml="$lxml_version" -v channel="$build_channel" \

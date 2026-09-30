@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, copy, sys, tempfile, unittest, zipfile, pathlib, lxml, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, read_zip(), write_zip(), set_font_alias(), used_format(), FontAliasThemeResolutionTests
+# [POS]: 验证字体别名与主题字体的解析和格式包兼容
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Theme-font and cross-locale font-alias regressions for style packs."""
 
 from __future__ import annotations

@@ -1,15 +1,15 @@
+/**
+ * [INPUT]: 依赖 System.Diagnostics, System.Text, System.Text.Json, FormaFushi.Windows.Generated
+ * [OUTPUT]: 提供 PythonBridge
+ * [POS]: 桥接 Windows 包内 Python 与 UTF-8 结构化输出
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using FormaFushi.Windows.Generated;
 
 namespace FormaFushi.Windows;
-
-internal sealed class AppFailure : Exception
-{
-    public AppFailure(string message) : base(message)
-    {
-    }
-}
 
 internal static class PythonBridge
 {
@@ -27,12 +27,12 @@ internal static class PythonBridge
 
         if (!File.Exists(pythonPath))
         {
-            throw new AppFailure("应用资源不完整：找不到 Python 运行环境。请重新安装 Forma 赋式。");
+            throw new AppFailure(UIStrings.Errors.RuntimeMissing);
         }
 
         if (!File.Exists(managerPath))
         {
-            throw new AppFailure("应用资源不完整：找不到 style_pack_manager.py。请重新安装 Forma 赋式。");
+            throw new AppFailure(UIStrings.Errors.ManagerMissing);
         }
 
         var startInfo = new ProcessStartInfo
@@ -64,7 +64,7 @@ internal static class PythonBridge
         {
             if (!process.Start())
             {
-                throw new AppFailure("无法启动文档处理组件。");
+                throw new AppFailure(UIStrings.Errors.ManagerLaunchFailedPlain);
             }
         }
         catch (AppFailure)
@@ -73,7 +73,7 @@ internal static class PythonBridge
         }
         catch (Exception exception)
         {
-            throw new AppFailure($"无法启动文档处理组件：{exception.Message}");
+            throw new AppFailure(UIStrings.Errors.ManagerLaunchFailed(exception.Message));
         }
 
         using var cancellationRegistration = cancellationToken.Register(
@@ -96,8 +96,8 @@ internal static class PythonBridge
         if (string.IsNullOrWhiteSpace(output))
         {
             throw new AppFailure(string.IsNullOrWhiteSpace(error)
-                ? "文档处理组件没有返回结果。"
-                : $"文档处理失败：{error}");
+                ? UIStrings.Errors.EmptyResult
+                : UIStrings.Errors.TransferFailedDetail(error));
         }
 
         ManagerEnvelope? envelope;
@@ -108,13 +108,13 @@ internal static class PythonBridge
         catch (JsonException)
         {
             throw new AppFailure(string.IsNullOrWhiteSpace(error)
-                ? "无法读取文档处理结果。"
-                : $"无法读取文档处理结果：{error}");
+                ? UIStrings.Errors.UnreadableResult
+                : UIStrings.Errors.UnreadableResultDetail(error));
         }
 
         if (envelope is null)
         {
-            throw new AppFailure("无法读取文档处理结果。");
+            throw new AppFailure(UIStrings.Errors.UnreadableResult);
         }
 
         envelope.Pack?.Normalize();
@@ -128,12 +128,12 @@ internal static class PythonBridge
 
         if (!envelope.Ok)
         {
-            throw new AppFailure(envelope.Error ?? "文档处理失败。");
+            throw new AppFailure(envelope.Error ?? UIStrings.Errors.TransferFailed);
         }
 
         if (process.ExitCode != 0)
         {
-            throw new AppFailure(envelope.Error ?? "文档处理组件异常退出。");
+            throw new AppFailure(envelope.Error ?? UIStrings.Errors.ManagerExit);
         }
 
         return envelope;

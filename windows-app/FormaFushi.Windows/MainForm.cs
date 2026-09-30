@@ -1,5 +1,11 @@
+/**
+ * [INPUT]: 依赖 System.Diagnostics, FormaFushi.Windows.Generated
+ * [OUTPUT]: 提供 MainForm
+ * [POS]: 协调 Windows 格式库读取、保存、删除和应用
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 using System.Diagnostics;
-using System.Text;
+using FormaFushi.Windows.Generated;
 
 namespace FormaFushi.Windows;
 
@@ -31,7 +37,7 @@ internal sealed partial class MainForm : Form
     {
         if (showProgress)
         {
-            SetBusy(true, "正在读取本机格式库…");
+            SetBusy(true, UIStrings.Busy.LoadingLibrary);
         }
 
         try
@@ -44,7 +50,7 @@ internal sealed partial class MainForm : Form
             RenderLibrary();
 
             _libraryNotice.Text = envelope.Errors is { Count: > 0 }
-                ? $"有 {envelope.Errors.Count} 个格式库文件无法读取，已自动跳过。"
+                ? UIStrings.Sidebar.ReadErrorNotice(envelope.Errors.Count.ToString())
                 : "";
             _libraryNotice.Visible = !string.IsNullOrWhiteSpace(_libraryNotice.Text);
 
@@ -64,7 +70,7 @@ internal sealed partial class MainForm : Form
                 ShowStep(1);
             }
 
-            _libraryCount.Text = $"本机已保存 {_packs.Count} 套";
+            _libraryCount.Text = UIStrings.App.LibraryCount(_packs.Count.ToString());
         }
         catch (Exception exception)
         {
@@ -83,23 +89,23 @@ internal sealed partial class MainForm : Form
     {
         if (!IsSupportedSource(sourcePath))
         {
-            ShowError(new AppFailure("请选择 .docx、.docm、.dotx 或 .dotm 格式的 Word 文件。"));
+            ShowError(new AppFailure(UIStrings.Errors.UnsupportedSource));
             return;
         }
 
-        SetBusy(true, "正在识别文档中实际使用的格式…");
+        SetBusy(true, UIStrings.Busy.Importing);
         try
         {
             Directory.CreateDirectory(_libraryDirectory);
-            var packPath = Path.Combine(_libraryDirectory, $"pack-{Guid.NewGuid():N}.wfstyle");
+            // 输出文件名由引擎决定，两端不再各自拼接命名规则。
             var displayName = Path.GetFileNameWithoutExtension(sourcePath);
             var envelope = await RunManagerAsync([
                 "create-pack",
                 "--source", sourcePath,
-                "--out", packPath,
+                "--dir", _libraryDirectory,
                 "--name", displayName
             ]);
-            var created = envelope.Pack ?? throw new AppFailure("格式已读取，但没有返回可展示的信息。");
+            var created = envelope.Pack ?? throw new AppFailure(UIStrings.Errors.PackMissingInfo);
             await ReloadLibraryAsync(created.LibraryIdentity, showProgress: false);
 
             var selected = _packs.FirstOrDefault(pack => pack.Id == created.Id && pack.PackPath == created.PackPath)
@@ -115,8 +121,7 @@ internal sealed partial class MainForm : Form
                 SelectPack(created, advance: true, resetTarget: true);
             }
 
-            _toastLabel.Text = $"“{created.Name}”已保存到本机格式库。";
-            _toastPanel.Visible = true;
+            ShowToast(UIStrings.ImportStep.SavedToast(created.Name));
         }
         catch (Exception exception)
         {
@@ -132,8 +137,8 @@ internal sealed partial class MainForm : Form
     {
         using var dialog = new OpenFileDialog
         {
-            Title = "选择 Word 格式源",
-            Filter = "Word 格式源 (*.docx;*.docm;*.dotx;*.dotm)|*.docx;*.docm;*.dotx;*.dotm",
+            Title = UIStrings.FilePicker.SourceTitle,
+            Filter = UIStrings.FilePicker.SourceFilter,
             CheckFileExists = true,
             Multiselect = false
         };
@@ -167,21 +172,21 @@ internal sealed partial class MainForm : Form
             return;
         }
 
-        var confirmation = MessageBox.Show(
+        var confirmed = ConfirmDialog.Show(
             this,
-            "只会把本机保存的这套格式方案移到回收站，不会删除原来的样板 Word 文件，也不会影响已经生成的文档。",
-            $"移除“{pack.Name}”？",
-            MessageBoxButtons.OKCancel,
-            MessageBoxIcon.Warning,
-            MessageBoxDefaultButton.Button2);
-        if (confirmation != DialogResult.OK)
+            UIStrings.Deletion.ConfirmTitle(pack.Name),
+            UIStrings.Deletion.ConfirmMessage,
+            UIStrings.Deletion.ConfirmPrimary,
+            UIStrings.Deletion.ConfirmCancel,
+            destructive: true);
+        if (!confirmed)
         {
             return;
         }
 
         var deletedIndex = Math.Max(0, _packs.FindIndex(item => item.Id == pack.Id && item.PackPath == pack.PackPath));
         var wasSelected = _selectedPack?.Id == pack.Id && _selectedPack?.PackPath == pack.PackPath;
-        SetBusy(true, $"正在将“{pack.Name}”移到回收站…");
+        SetBusy(true, UIStrings.Deletion.Busy(pack.Name));
         try
         {
             PackDeletionPolicy.MoveToRecycleBin(pack, _packs, _libraryDirectory);
@@ -190,10 +195,10 @@ internal sealed partial class MainForm : Form
             {
                 _selectedPack = null;
                 ClearTarget();
-                if (_packs.Count > 0)
+                var nextIndex = PackDeletionPolicy.FallbackIndex(deletedIndex, _packs.Count);
+                if (nextIndex is int index)
                 {
-                    var next = _packs[Math.Min(deletedIndex, _packs.Count - 1)];
-                    SelectPack(next, advance: false, resetTarget: false);
+                    SelectPack(_packs[index], advance: false, resetTarget: false);
                     ShowStep(2);
                 }
                 else
@@ -203,8 +208,7 @@ internal sealed partial class MainForm : Form
             }
 
             await ReloadLibraryAsync(_selectedPack?.LibraryIdentity, showProgress: false);
-            _toastLabel.Text = $"已将“{pack.Name}”移到回收站，需要时可以恢复。";
-            _toastPanel.Visible = true;
+            ShowToast(UIStrings.Deletion.Done(pack.Name));
         }
         catch (Exception exception)
         {
@@ -220,8 +224,8 @@ internal sealed partial class MainForm : Form
     {
         using var dialog = new OpenFileDialog
         {
-            Title = "选择要修改格式的 Word 文件",
-            Filter = "Word 文档 (*.docx;*.docm)|*.docx;*.docm",
+            Title = UIStrings.FilePicker.TargetTitle,
+            Filter = UIStrings.FilePicker.TargetFilter,
             CheckFileExists = true,
             Multiselect = false
         };
@@ -235,7 +239,7 @@ internal sealed partial class MainForm : Form
     {
         if (!IsSupportedTarget(path))
         {
-            ShowError(new AppFailure("目标文件只支持 .docx 或 .docm。"));
+            ShowError(new AppFailure(UIStrings.Errors.UnsupportedTarget));
             return;
         }
 
@@ -254,19 +258,21 @@ internal sealed partial class MainForm : Form
     {
         if (_selectedPack is null || string.IsNullOrWhiteSpace(_selectedPack.PackPath) || string.IsNullOrWhiteSpace(_targetPath))
         {
-            ShowError(new AppFailure("请先选择格式库和要修改的 Word 文件。"));
+            ShowError(new AppFailure(UIStrings.Errors.MissingSelection));
             return;
         }
 
         var extension = Path.GetExtension(_targetPath).ToLowerInvariant();
         using var dialog = new SaveFileDialog
         {
-            Title = "保存应用格式后的 Word 文件",
-            Filter = extension == ".docm" ? "启用宏的 Word 文档 (*.docm)|*.docm" : "Word 文档 (*.docx)|*.docx",
+            Title = UIStrings.FilePicker.SaveTitle,
+            Filter = extension == ".docm"
+                ? UIStrings.FilePicker.OutputFilterDocm
+                : UIStrings.FilePicker.OutputFilterDocx,
             DefaultExt = extension.TrimStart('.'),
             AddExtension = true,
             OverwritePrompt = true,
-            FileName = $"{Path.GetFileNameWithoutExtension(_targetPath)}-已套用格式{extension}",
+            FileName = Path.GetFileNameWithoutExtension(_targetPath) + UIStrings.FilePicker.OutputSuffix + extension,
             InitialDirectory = Path.GetDirectoryName(_targetPath)
         };
         if (dialog.ShowDialog(this) != DialogResult.OK)
@@ -277,17 +283,17 @@ internal sealed partial class MainForm : Form
         var destination = Path.GetFullPath(dialog.FileName);
         if (!string.Equals(Path.GetExtension(destination), extension, StringComparison.OrdinalIgnoreCase))
         {
-            ShowError(new AppFailure("输出文件必须与目标文件保持相同扩展名。"));
+            ShowError(new AppFailure(UIStrings.Errors.ExtensionMismatch));
             return;
         }
 
         if (string.Equals(destination, Path.GetFullPath(_targetPath), StringComparison.OrdinalIgnoreCase))
         {
-            ShowError(new AppFailure("为保护原文件，请另存为一个新文件。"));
+            ShowError(new AppFailure(UIStrings.Errors.SameAsTarget));
             return;
         }
 
-        SetBusy(true, $"正在清理旧格式并应用“{_selectedPack.Name}”…");
+        SetBusy(true, UIStrings.Busy.Applying(_selectedPack.Name));
         try
         {
             var arguments = new List<string>
@@ -313,16 +319,17 @@ internal sealed partial class MainForm : Form
             _successPath.Text = _outputPath;
             var warnings = envelope.Stats?.Warnings?
                 .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value.Trim())
                 .Distinct()
                 .ToList() ?? [];
             _successWarnings.Text = warnings.Count > 0
-                ? "请留意：" + string.Join("；", warnings.Take(3))
+                ? UIStrings.Success.Warnings(string.Join(UIStrings.Success.WarningSeparator, warnings.Take(3)))
                 : "";
             _successWarnings.Visible = warnings.Count > 0;
             _targetEmptyPanel.Visible = false;
             _targetChosenPanel.Visible = false;
             _successPanel.Visible = true;
-            _applyButton.Text = "重新生成";
+            _applyButton.Text = UIStrings.ApplyStep.ApplyAgainButton;
         }
         catch (Exception exception)
         {
@@ -338,7 +345,7 @@ internal sealed partial class MainForm : Form
     {
         if (string.IsNullOrWhiteSpace(_outputPath) || !File.Exists(_outputPath))
         {
-            ShowError(new AppFailure("生成的文件已经移动或删除。"));
+            ShowError(new AppFailure(UIStrings.Errors.OutputMissing));
             return;
         }
 
@@ -348,7 +355,7 @@ internal sealed partial class MainForm : Form
         }
         catch (Exception exception)
         {
-            ShowError(new AppFailure($"无法打开生成的文件：{exception.Message}"));
+            ShowError(new AppFailure(UIStrings.Errors.OpenFailed(exception.Message)));
         }
     }
 
@@ -356,7 +363,7 @@ internal sealed partial class MainForm : Form
     {
         if (string.IsNullOrWhiteSpace(_outputPath) || !File.Exists(_outputPath))
         {
-            ShowError(new AppFailure("生成的文件已经移动或删除。"));
+            ShowError(new AppFailure(UIStrings.Errors.OutputMissing));
             return;
         }
 
@@ -368,7 +375,7 @@ internal sealed partial class MainForm : Form
         }
         catch (Exception exception)
         {
-            ShowError(new AppFailure($"无法在文件夹中显示结果：{exception.Message}"));
+            ShowError(new AppFailure(UIStrings.Errors.RevealFailed(exception.Message)));
         }
     }
 
@@ -382,7 +389,7 @@ internal sealed partial class MainForm : Form
             _targetChosenPanel.Visible = false;
             _targetEmptyPanel.Visible = true;
             _applyButton.Enabled = false;
-            _applyButton.Text = "选择保存位置并应用";
+            _applyButton.Text = UIStrings.ApplyStep.ApplyButton;
             _successPanel.Visible = false;
         }
     }
@@ -422,13 +429,13 @@ internal sealed partial class MainForm : Form
 
         var message = exception switch
         {
-            UnauthorizedAccessException => "无法读取或写入所选位置，请选择“文档”或桌面等可写位置。",
-            FileNotFoundException => "所选文件已被移动或删除，请重新选择。",
+            UnauthorizedAccessException => UIStrings.Errors.Unauthorized,
+            FileNotFoundException => UIStrings.Errors.FileNotFound,
             IOException when exception.Message.Contains("used by another process", StringComparison.OrdinalIgnoreCase) =>
-                "文件正在被 Word 或其他程序占用，请关闭文件后重试。",
+                UIStrings.Errors.FileLocked,
             _ => exception.Message
         };
-        MessageBox.Show(this, message, "操作没有完成", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        MessageBox.Show(this, message, UIStrings.App.ErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 
     private Task<ManagerEnvelope> RunManagerAsync(IEnumerable<string> arguments)
