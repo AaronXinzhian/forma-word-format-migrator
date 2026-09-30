@@ -15,7 +15,7 @@ Python/lxml 负责受限 ZIP/XML 解析与迁移；Mac 使用 SwiftUI、AppKit�
 ```text
 word-format-migrator/
 ├── style_pack_manager.py   # 格式资产、预检、导入导出、编辑派生和 CLI
-├── word_style_transfer.py  # OOXML 迁移、标题语义和表格保护
+├── word_style_transfer.py  # OOXML 迁移、标题语义、编号身份隔离和表格保护
 ├── scripts/               # 构建、生成与文档检查 → scripts/FOLDER_INDEX.md
 ├── shared/                # 两平台共享文案源
 ├── swift-app/             # Mac 入口 → swift-app/FOLDER_INDEX.md

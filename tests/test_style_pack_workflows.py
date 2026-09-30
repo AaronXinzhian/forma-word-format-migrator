@@ -2,8 +2,8 @@
 """End-to-end format-library exchange, preflight and constrained edits.
 
 [INPUT]: 依赖 __future__, contextlib, copy, hashlib, io, json, os, shutil, sys, tempfile, unittest, pathlib, lxml, style_pack_manager, word_style_transfer
-[OUTPUT] Exchange preservation, stale-preflight rejection and edited DOCX checks
-[POS] Format-library workflow regression suite
+[OUTPUT] Exchange preservation, stale-preflight rejection, edited DOCX and independent list identity checks
+[POS] Format-library workflow regression suite including cloned heading and body-list identity isolation
 [PROTOCOL] Keep this header and the project indexes synchronized after edits.
 """
 from __future__ import annotations
@@ -38,6 +38,192 @@ class StylePackWorkflowTests(unittest.TestCase):
         manager.create_style_pack(PROJECT_DIR / "tests/fixtures/source-numbered-headings.docx", self.pack)
         self.target = self.root / "target.docx"
         shutil.copy2(PROJECT_DIR / "tests/fixtures/target.docx", self.target)
+
+    def _append_target_paragraphs(self, paragraphs):
+        package = core.load_package(self.target, "target")
+        document = core.parse_xml(package.entries["word/document.xml"], "document")
+        body = document.find("w:body", namespaces=core.NS)
+        section = body.find("w:sectPr", namespaces=core.NS)
+        insertion = body.index(section) if section is not None else len(body)
+        for text, style_id, num_id in paragraphs:
+            paragraph = etree.Element(core.qn(core.W_NS, "p"))
+            properties = etree.SubElement(paragraph, core.qn(core.W_NS, "pPr"))
+            style = etree.SubElement(properties, core.qn(core.W_NS, "pStyle"))
+            style.set(core.qn(core.W_NS, "val"), style_id)
+            if num_id is not None:
+                numbering = etree.SubElement(properties, core.qn(core.W_NS, "numPr"))
+                for tag, value in (("ilvl", "0"), ("numId", num_id)):
+                    node = etree.SubElement(numbering, core.qn(core.W_NS, tag))
+                    node.set(core.qn(core.W_NS, "val"), value)
+            run = etree.SubElement(paragraph, core.qn(core.W_NS, "r"))
+            etree.SubElement(run, core.qn(core.W_NS, "t")).text = text
+            body.insert(insertion, paragraph)
+            insertion += 1
+        package.entries["word/document.xml"] = core.serialize_xml(document)
+        core.write_package(package, package.entries, self.target)
+
+    def _active_heading_abstract(self, entries, style_id):
+        catalog = core.build_style_catalog(entries["word/styles.xml"], entries.get("word/document.xml", manager._placeholder_document()))
+        rule = core.infer_heading_numbering_rules(entries, catalog, [style_id])[style_id]
+        _root, abstracts, nums, styles = core._numbering_index(entries)
+        abstract = core._abstract_for_num(nums[rule.num_id], abstracts, nums, styles)
+        self.assertIsNotNone(abstract)
+        return rule, abstract
+
+    def _assert_original_abstracts_and_fresh_clone_nsids(self, before_entries, after_entries):
+        before_root, before, _nums, _styles = core._numbering_index(before_entries)
+        _after_root, after, _nums, _styles = core._numbering_index(after_entries)
+        for abstract_id, original in before.items():
+            self.assertIn(abstract_id, after)
+            self.assertEqual(etree.tostring(after[abstract_id], method="c14n"), etree.tostring(original, method="c14n"))
+        occupied = {value.upper() for value in before_root.xpath("./w:abstractNum/w:nsid/@w:val", namespaces=core.NS)}
+        clone_nsids = []
+        for abstract_id in set(after).difference(before):
+            value = after[abstract_id].xpath("string(w:nsid/@w:val)", namespaces=core.NS)
+            self.assertRegex(value, r"^[0-9A-Fa-f]{8}$")
+            self.assertNotIn(value.upper(), occupied)
+            clone_nsids.append(value.upper())
+        self.assertTrue(clone_nsids, "the workflow must actually create an independent abstract list")
+        self.assertEqual(len(clone_nsids), len(set(clone_nsids)))
+
+    def test_created_and_applied_inferred_headings_have_independent_list_identity(self):
+        source = core.load_package(PROJECT_DIR / "tests/fixtures/source-numbered-headings.docx", "source")
+        _manifest, pack_entries = manager.load_style_pack(self.pack)
+        self._assert_original_abstracts_and_fresh_clone_nsids(source.entries, pack_entries)
+        _rule, original = self._active_heading_abstract(source.entries, "Heading3")
+        original_nsid = original.xpath("string(w:nsid/@w:val)", namespaces=core.NS)
+        original_template = original.xpath("string(w:tmpl/@w:val)", namespaces=core.NS)
+        for style_id in ("Heading4", "Heading5"):
+            rule, abstract = self._active_heading_abstract(pack_entries, style_id)
+            self.assertEqual(rule.level, int(style_id[-1]) - 1)
+            self.assertNotEqual(abstract.xpath("string(w:nsid/@w:val)", namespaces=core.NS), original_nsid)
+            self.assertEqual(abstract.xpath("string(w:tmpl/@w:val)", namespaces=core.NS), original_template)
+        self._append_target_paragraphs([("identity " + style_id, style_id, None) for style_id in ("Heading4", "Heading5")])
+        output = self.root / "independent-inferred.docx"
+        manager.apply_style_pack(self.pack, self.target, output)
+        result = core.load_package(output, "result")
+        self._assert_original_abstracts_and_fresh_clone_nsids(pack_entries, result.entries)
+        for style_id in ("Heading4", "Heading5"):
+            rule, abstract = self._active_heading_abstract(result.entries, style_id)
+            self.assertEqual(rule.level_text, ".".join("%%%d" % level for level in range(1, int(style_id[-1]) + 1)))
+            self.assertEqual(abstract.xpath("string(w:tmpl/@w:val)", namespaces=core.NS), original_template)
+
+    def test_edited_h4_demotion_uses_fresh_identity_and_preserves_numbering_pattern(self):
+        derived = self.root / "hyphen-h4.wfstyle"
+        manager.derive_style_pack(self.pack, derived, {"styles": [{"style_id": "Heading4", "numbering_pattern": "%1-%2-%3-%4"}]})
+        _manifest, entries = manager.load_style_pack(derived)
+        self._append_target_paragraphs([("demote into edited H4", "Heading3", None), ("extend to H6", "Heading5", None)])
+        output = self.root / "hyphen-h4-demoted.docx"
+        manager.apply_style_pack(derived, self.target, output, demote_headings=True)
+        result = core.load_package(output, "result")
+        self._assert_original_abstracts_and_fresh_clone_nsids(entries, result.entries)
+        rule, abstract = self._active_heading_abstract(result.entries, "Heading4")
+        self.assertEqual(rule.level_text, "%1-%2-%3-%4")
+        self.assertEqual(core._level_node(abstract, 3).xpath("string(w:lvlText/@w:val)", namespaces=core.NS), "%1-%2-%3-%4")
+        document = core.parse_xml(result.entries["word/document.xml"], "document")
+        paragraph = next(node for node in document.xpath("//w:p", namespaces=core.NS) if "".join(node.xpath(".//w:t/text()", namespaces=core.NS)) == "demote into edited H4")
+        self.assertEqual(paragraph.xpath("string(w:pPr/w:pStyle/@w:val)", namespaces=core.NS), "Heading4")
+        self.assertEqual(paragraph.xpath("string(w:pPr/w:numPr/w:numId/@w:val)", namespaces=core.NS), rule.num_id)
+        self.assertEqual(paragraph.xpath("string(w:pPr/w:numPr/w:ilvl/@w:val)", namespaces=core.NS), "3")
+        self.assertEqual(self._active_heading_abstract(result.entries, "Heading6")[0].level, 5)
+
+    def test_duplicate_nsid_legacy_pack_runtime_repair_keeps_user_numbering_edits(self):
+        edits = {
+            "Heading4": {"numbering_format": "upperRoman", "numbering_pattern": "%1-%2-%3-%4", "numbering_start": 4, "numbering_restart": False},
+            "Heading5": {"numbering_format": "lowerLetter", "numbering_pattern": "第%5节", "numbering_start": 3, "numbering_restart": True},
+        }
+        derived = self.root / "legacy-edited.wfstyle"
+        manager.derive_style_pack(self.pack, derived, {"styles": [{"style_id": style_id, **fields} for style_id, fields in edits.items()]})
+        manifest, entries = manager.load_style_pack(derived)
+        manifest.pop("heading_numbering_user_edits")
+        root, abstracts, nums, styles = core._numbering_index(entries)
+        rule = core.heading_numbering_from_manifest(manifest["heading_numbering"], entries, core.build_style_catalog(entries["word/styles.xml"], manager._placeholder_document()))["Heading4"]
+        clone = core._abstract_for_num(nums[rule.num_id], abstracts, nums, styles)
+        source = core.load_package(PROJECT_DIR / "tests/fixtures/source-numbered-headings.docx", "source")
+        original = self._active_heading_abstract(source.entries, "Heading3")[1]
+        duplicate_nsid = original.xpath("string(w:nsid/@w:val)", namespaces=core.NS)
+        clone.find("w:nsid", namespaces=core.NS).set(core.qn(core.W_NS, "val"), duplicate_nsid)
+        self.assertGreater(len(root.xpath("./w:abstractNum[w:nsid/@w:val=$nsid]", namespaces=core.NS, nsid=duplicate_nsid)), 1)
+        entries["word/numbering.xml"] = core.serialize_xml(root)
+        legacy = self.root / "duplicate-nsid-legacy.wfstyle"
+        manager._write_style_pack_archive(legacy, manifest, entries)
+        before = legacy.read_bytes()
+        self._append_target_paragraphs([("legacy identity " + style_id, style_id, None) for style_id in edits])
+        output = self.root / "duplicate-nsid-repaired.docx"
+        manager.apply_style_pack(legacy, self.target, output)
+        result = core.load_package(output, "result")
+        self._assert_original_abstracts_and_fresh_clone_nsids(entries, result.entries)
+        for style_id, fields in edits.items():
+            rule, abstract = self._active_heading_abstract(result.entries, style_id)
+            self.assertNotEqual(abstract.xpath("string(w:nsid/@w:val)", namespaces=core.NS), duplicate_nsid)
+            self.assertEqual(rule.number_format, fields["numbering_format"])
+            self.assertEqual(rule.level_text, fields["numbering_pattern"])
+            self.assertEqual(rule.start, fields["numbering_start"])
+            self.assertIs(manager._numbering_restarts(result.entries, rule), fields["numbering_restart"])
+        self.assertEqual(legacy.read_bytes(), before)
+
+    def test_body_list_import_collision_changes_only_identity_and_preserves_shared_abstract(self):
+        _manifest, source_entries = manager.load_style_pack(self.pack)
+        _source_root, source_abstracts, _nums, _styles = core._numbering_index(source_entries)
+        target = core.load_package(self.target, "target")
+        root, abstracts, nums, styles = core._numbering_index(target.entries)
+        authority = core._abstract_for_num(nums["1"], abstracts, nums, styles)
+        imported = copy.deepcopy(authority)
+        imported.set(core.qn(core.W_NS, "abstractNumId"), "777")
+        conflicting_nsid = next(iter(source_abstracts.values())).xpath("string(w:nsid/@w:val)", namespaces=core.NS)
+        imported.find("w:nsid", namespaces=core.NS).set(core.qn(core.W_NS, "val"), conflicting_nsid)
+        imported.find("w:tmpl", namespaces=core.NS).set(core.qn(core.W_NS, "val"), "AA001122")
+        level = core._level_node(imported, 0)
+        for node in list(level.findall("w:pStyle", namespaces=core.NS)):
+            level.remove(node)
+        for tag, value in (("numFmt", "decimal"), ("lvlText", "%1)"), ("lvlJc", "right")):
+            core._set_level_child_value(level, tag, value)
+        properties = level.find("w:pPr", namespaces=core.NS)
+        if properties is None:
+            properties = etree.SubElement(level, core.qn(core.W_NS, "pPr"))
+        indent = properties.find("w:ind", namespaces=core.NS)
+        if indent is None:
+            indent = etree.SubElement(properties, core.qn(core.W_NS, "ind"))
+        indent.set(core.qn(core.W_NS, "left"), "1234")
+        indent.set(core.qn(core.W_NS, "hanging"), "321")
+        core._insert_numbering_root_child(root, imported)
+        original_nums = {}
+        for num_id in ("777", "778"):
+            instance = etree.Element(core.qn(core.W_NS, "num"), nsmap={"w": core.W_NS})
+            instance.set(core.qn(core.W_NS, "numId"), num_id)
+            etree.SubElement(instance, core.qn(core.W_NS, "abstractNumId")).set(core.qn(core.W_NS, "val"), "777")
+            if num_id == "777":
+                override = etree.SubElement(instance, core.qn(core.W_NS, "lvlOverride"))
+                override.set(core.qn(core.W_NS, "ilvl"), "0")
+                etree.SubElement(override, core.qn(core.W_NS, "startOverride")).set(core.qn(core.W_NS, "val"), "7")
+            original_nums[num_id] = copy.deepcopy(instance)
+            core._insert_numbering_root_child(root, instance)
+        target.entries["word/numbering.xml"] = core.serialize_xml(root)
+        core.write_package(target, target.entries, self.target)
+        self._append_target_paragraphs([("body from seven", "Normal", "777"), ("body continuation", "Normal", "777"), ("body independent", "Normal", "778")])
+        output = self.root / "body-identity-isolated.docx"
+        manager.apply_style_pack(self.pack, self.target, output)
+        result = core.load_package(output, "result")
+        self._assert_original_abstracts_and_fresh_clone_nsids(source_entries, result.entries)
+        document = core.parse_xml(result.entries["word/document.xml"], "document")
+        mapped = {}
+        for text in ("body from seven", "body continuation", "body independent"):
+            paragraph = next(node for node in document.xpath("//w:p", namespaces=core.NS) if "".join(node.xpath(".//w:t/text()", namespaces=core.NS)) == text)
+            mapped[text] = paragraph.xpath("string(w:pPr/w:numPr/w:numId/@w:val)", namespaces=core.NS)
+        self.assertEqual(mapped["body from seven"], mapped["body continuation"])
+        self.assertNotEqual(mapped["body from seven"], mapped["body independent"])
+        _root, result_abstracts, result_nums, result_styles = core._numbering_index(result.entries)
+        shared = core._abstract_for_num(result_nums[mapped["body from seven"]], result_abstracts, result_nums, result_styles)
+        independent = core._abstract_for_num(result_nums[mapped["body independent"]], result_abstracts, result_nums, result_styles)
+        self.assertEqual(shared.get(core.qn(core.W_NS, "abstractNumId")), independent.get(core.qn(core.W_NS, "abstractNumId")))
+        self.assertNotEqual(shared.xpath("string(w:nsid/@w:val)", namespaces=core.NS), conflicting_nsid)
+        self.assertEqual(shared.xpath("string(w:tmpl/@w:val)", namespaces=core.NS), "AA001122")
+        self.assertEqual(etree.tostring(core._level_node(shared, 0), method="c14n"), etree.tostring(level, method="c14n"))
+        for old_id, text in (("777", "body from seven"), ("778", "body independent")):
+            actual = copy.deepcopy(result_nums[mapped[text]])
+            actual.set(core.qn(core.W_NS, "numId"), old_id)
+            actual.find("w:abstractNumId", namespaces=core.NS).set(core.qn(core.W_NS, "val"), "777")
+            self.assertEqual(etree.tostring(actual, method="c14n"), etree.tostring(original_nums[old_id], method="c14n"))
 
     def test_export_import_is_validated_deduplicated_and_preserves_source(self):
         original = self.pack.read_bytes()

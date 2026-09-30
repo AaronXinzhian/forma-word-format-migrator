@@ -12,7 +12,7 @@ Supported target/output files: .docx, .docm
 This utility intentionally never edits either input file in place.
 
 [INPUT]: 依赖 __future__, argparse, copy, hashlib, io, json, os, posixpath, re, sys, tempfile, zipfile, collections, dataclasses, pathlib, typing
-[OUTPUT]: 提供有界不可变输入快照、格式迁移、有效大纲解析、标题层级收集与安全输出接口
+[OUTPUT]: 提供有界不可变输入快照、格式迁移、有效大纲解析、独立编号身份与安全输出接口
 [POS]: 文档格式引擎，保持目标内容语义并应用源样式、编号和页面布局
 [PROTOCOL]: 变更时更新此头部，然后检查上级 FOLDER_INDEX.md
 """
@@ -2173,6 +2173,39 @@ def _heading_numbering_levels_are_hierarchical(
     return True
 
 
+def _numbering_nsids(root: etree._Element) -> Set[str]:
+    return {
+        value.upper()
+        for value in root.xpath("./w:abstractNum/w:nsid/@w:val", namespaces=NS)
+    }
+
+
+def _assign_independent_numbering_identity(
+    abstract: etree._Element,
+    occupied_nsids: Set[str],
+) -> None:
+    """Give a cloned list its own Word identity, not just a new numeric ID.
+
+    Word can coalesce abstract lists with the same nsid even when their
+    abstractNumId values differ.  Reusing an H1-H3 identity for an extended
+    H1-H5 definition makes the additional levels disappear in Word.  Only
+    the clone's identity changes; authored levels, counters and tmpl stay
+    untouched.  Stable content-based allocation also keeps repeated builds
+    reproducible and reserves identities for clones not yet in the tree.
+    """
+    seed = hashlib.sha256(b"Forma independent numbering\0" + serialize_xml(abstract)).digest()
+    candidate = int.from_bytes(seed[:4], "big")
+    while candidate == 0 or "%08X" % candidate in occupied_nsids:
+        candidate = (candidate + 1) % (1 << 32)
+    identity = "%08X" % candidate
+    occupied_nsids.add(identity)
+    node = abstract.find("w:nsid", namespaces=NS)
+    if node is None:
+        node = etree.Element(qn(W_NS, "nsid"))
+        abstract.insert(0, node)
+    node.set(qn(W_NS, "val"), identity)
+
+
 def _extend_heading_numbering(
     entries: Dict[str, bytes],
     authority: Dict[int, str],
@@ -2377,6 +2410,9 @@ def _extend_heading_numbering(
     first_num = numbering_root.find("w:num", namespaces=NS)
     abstract_insertion = (
         numbering_root.index(first_num) if first_num is not None else len(numbering_root)
+    )
+    _assign_independent_numbering_identity(
+        generated_abstract, _numbering_nsids(numbering_root)
     )
     numbering_root.insert(abstract_insertion, generated_abstract)
     generated_num = etree.Element(qn(W_NS, "num"))
@@ -4893,6 +4929,7 @@ def merge_target_body_numbering(
         for node in source_root.findall("w:abstractNum", namespaces=NS)
         if node.get(qn(W_NS, "abstractNumId")) is not None
     }
+    occupied_nsids = _numbering_nsids(source_root)
     used_picture_ids = {
         str(node.get(qn(W_NS, "numPicBulletId")))
         for node in source_root.findall("w:numPicBullet", namespaces=NS)
@@ -4964,6 +5001,7 @@ def merge_target_body_numbering(
                     )
                     picture_clones.append(picture_clone)
                 picture_ref.set(qn(W_NS, "val"), new_picture_id)
+            _assign_independent_numbering_identity(abstract_clone, occupied_nsids)
             abstract_clones.append(abstract_clone)
 
         new_num_id = _fresh_numeric_id(used_num_ids, 1)

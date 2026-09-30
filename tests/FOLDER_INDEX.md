@@ -26,7 +26,7 @@
 | test_style_pack_derivation.py | 验证多样式编辑派生与原格式资产保护 | TEST_DIR, PROJECT_DIR, FIXTURES, style_node(), write_pack_unchecked(), StylePackDerivationTests |
 | test_style_pack_input_limits.py | 验证格式包清单及编辑输入的资源限制 | TEST_DIR, PROJECT_DIR, FIXTURES, synthetic_info(), write_pack_with_manifest(), StylePackInputLimitTests |
 | test_style_pack_security.py | 验证格式包仅允许格式 XML 与安全关系 | PROJECT_DIR, StylePackSecurityTests |
-| test_style_pack_workflows.py | 验证预检绑定、导入导出及编号表格编辑闭环 | PROJECT_DIR, StylePackWorkflowTests |
+| test_style_pack_workflows.py | 验证预检绑定、导入导出、编号表格编辑及独立列表身份闭环 | PROJECT_DIR, StylePackWorkflowTests |
 | test_table_fallback.py | 验证无表格模板下目标表格结构与样式保留 | TEST_DIR, PROJECT_DIR, FIXTURES, NS, read_zip(), document_root(), table_structure(), canonical_nodes(), table_style_node(), default_table_style(), TableFallbackTests |
 | test_table_paragraph_indent.py | 验证表格两字符首行缩进清理和重复应用稳定性 | TEST_DIR, PROJECT_DIR, FIXTURES, NS, W_VAL, _CUSTOM_BODY_STYLE_SPECS, TableParagraphIndentTests |
 | test_transfer.py | 验证真实 Word 迁移、CLI 与内容语义保留 | TEST_DIR, PROJECT_DIR, FIXTURES, ENGINE, W_NS, R_NS, NS, qn(), read_zip(), xml(), paragraph_for_text(), semantic_xml(), style_node(), TransferEndToEndTests |
