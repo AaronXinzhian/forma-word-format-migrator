@@ -116,6 +116,16 @@ function sign_item() {
   fi
 }
 
+function verify_universal_binary() {
+  local binary="$1"
+  local binary_arch
+  # 新版 CLT 的 lipo 对多参数 verify_arch 的解析不同；逐架构检验
+  # 与一次检验两架构的门禁等价，并兼容既有 Apple 工具链。
+  for binary_arch in arm64 x86_64; do
+    /usr/bin/lipo "$binary" -verify_arch "$binary_arch"
+  done
+}
+
 function source_fingerprint() {
   (
     cd "$project_root"
@@ -224,7 +234,7 @@ lipo -create \
   "$arm_dir/WordFormatLibrary" \
   "$intel_dir/WordFormatLibrary" \
   -output "$app_dir/Contents/MacOS/WordFormatLibrary"
-lipo "$app_dir/Contents/MacOS/WordFormatLibrary" -verify_arch arm64 x86_64
+verify_universal_binary "$app_dir/Contents/MacOS/WordFormatLibrary"
 
 install -m 644 "$info_plist" "$app_dir/Contents/Info.plist"
 install -m 644 "$project_root/build-assets/WordFormatIcon.icns" \
@@ -288,8 +298,8 @@ ditto \
   "$python_version_root/lib/python${python_minor}/site-packages/lxml-${lxml_version}.dist-info/licenses" \
   "$release_root/第三方许可/lxml"
 
-lipo "$python_library" -verify_arch arm64 x86_64
-lipo "$python_cli" -verify_arch arm64 x86_64
+verify_universal_binary "$python_library"
+verify_universal_binary "$python_cli"
 lxml_binary=$(find \
   "$python_version_root/lib/python${python_minor}/site-packages/lxml" \
   -name 'etree*.so' -print -quit)
@@ -297,7 +307,7 @@ if [[ -z "$lxml_binary" ]]; then
   print -u2 "内置 lxml 不完整：找不到 etree 扩展。"
   exit 1
 fi
-lipo "$lxml_binary" -verify_arch arm64 x86_64
+verify_universal_binary "$lxml_binary"
 
 print "[5/8] 对嵌套运行环境和应用逐层签名"
 xattr -cr "$app_dir"

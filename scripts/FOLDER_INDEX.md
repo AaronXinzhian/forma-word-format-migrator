@@ -8,7 +8,7 @@
 ## 文件清单
 | 文件 | 职责 | 关键导出 |
 |------|------|----------|
-| build_macos_app.sh | 构建双架构 Mac 包并执行运行时、签名与归档验证 | cleanup_build_root, download_verified, remove_build_tree, is_signable_macho, sign_item, source_fingerprint |
+| build_macos_app.sh | 构建双架构 Mac 包并执行运行时、签名与归档验证 | cleanup_build_root, download_verified, remove_build_tree, is_signable_macho, sign_item, verify_universal_binary, source_fingerprint |
 | build_windows_app.ps1 | 在 Windows 本机构建并执行打包、签名及解压后验证 | — |
 | build_windows_app.sh | 在 Mac 交叉构建 Windows 包，不冒充 Windows 执行验收 | — |
 | check_project_docs.py | 用受版本控制的源码快照执行 GEB 文档闭环 | source_paths(), main() |
