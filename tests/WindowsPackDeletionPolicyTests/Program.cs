@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 System.Text.Json, FormaFushi.Windows, Microsoft.VisualBasic.FileIO
+ * [OUTPUT]: 提供 DeletionTestFailure, Program
+ * [POS]: 隔离验证 Windows 删除策略路径、链接及文件扩展名
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 using System.Text.Json;
 using FormaFushi.Windows;
 using Microsoft.VisualBasic.FileIO;

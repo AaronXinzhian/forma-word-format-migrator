@@ -1,8 +1,36 @@
+// [INPUT]: 依赖 AppKit, Darwin, SwiftUI, UniformTypeIdentifiers
+// [OUTPUT]: 提供FormatPreviewStepView 中的类型与接口
+// [POS]: Mac 原生终端 - 实际使用格式筛选、卡片与编辑入口
+// [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+import AppKit
+import Darwin
 import SwiftUI
+import UniformTypeIdentifiers
+
+enum FormatFilter: String, CaseIterable, Identifiable {
+    case all = "全部"
+    case headings = "标题"
+    case paragraphs = "正文与段落"
+    case characters = "字符"
+    case tables = "表格"
+
+    var id: String { rawValue }
+
+    func includes(_ format: UsedFormat) -> Bool {
+        switch self {
+        case .all: return true
+        case .headings: return format.type == "paragraph" && format.outlineLevel != nil
+        case .paragraphs: return format.type == "paragraph" && format.outlineLevel == nil
+        case .characters: return format.type == "character"
+        case .tables: return format.type == "table"
+        }
+    }
+}
 
 struct FormatPreviewStepView: View {
     @ObservedObject var model: WordFormatLibraryModel
     @State private var filter: FormatFilter = .all
+    @State private var isShowingStyleEditor = false
 
     private var formats: [UsedFormat] {
         model.selectedPack?.usedFormats.filter(filter.includes) ?? []
@@ -15,22 +43,28 @@ struct FormatPreviewStepView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(pack.name)
                             .font(.system(size: 23, weight: .bold, design: .rounded))
-                        Text(summaryText(for: pack))
+                        Text(pack.formatOverviewDescription)
                             .font(.system(size: 12.5))
                             .foregroundStyle(Palette.mutedInk)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
                     Button {
+                        isShowingStyleEditor = true
+                    } label: {
+                        Label("编辑格式方案", systemImage: "slider.horizontal.3")
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                    .help("调整标题、段落、字符或表格样式，并另存为新方案")
+                    Button {
                         model.highlightLibrary()
                     } label: {
-                        Label(UIStrings.PreviewStep.switchPackButton, systemImage: "arrow.left.arrow.right")
+                        Label("换一套格式", systemImage: "arrow.left.arrow.right")
                     }
                     .buttonStyle(SecondaryButtonStyle())
                     Button {
                         model.beginTargetStep()
                     } label: {
-                        Label(UIStrings.PreviewStep.nextButton, systemImage: "arrow.right")
+                        Label("下一步", systemImage: "arrow.right")
                     }
                     .buttonStyle(PrimaryButtonStyle())
                 }
@@ -42,157 +76,117 @@ struct FormatPreviewStepView: View {
                 HStack(spacing: 0) {
                     VStack(spacing: 0) {
                         SummaryBar(pack: pack)
-                        PreviewNotices(pack: pack)
-                        FormatFilterBar(filter: $filter, formats: pack.usedFormats)
-                        formatGrid
+                        if pack.manualFormatting.paragraphCount > 0 || pack.manualFormatting.runCount > 0 {
+                            ManualFormattingNotice(manual: pack.manualFormatting)
+                                .padding(.horizontal, 24)
+                                .padding(.top, 12)
+                        }
+                        if let conflicts = pack.headingNumberingConflicts, !conflicts.isEmpty {
+                            Label(
+                                "检测到 \(conflicts.count) 个标题样式使用多套编号；将采用最常用规则，请在生成后检查章节重启。",
+                                systemImage: "exclamationmark.triangle"
+                            )
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(Color.orange)
+                            .padding(.horizontal, 24)
+                            .padding(.top, 12)
+                        }
+                        if let warnings = pack.headingCompletionWarnings, !warnings.isEmpty {
+                            ForEach(warnings, id: \.self) { warning in
+                                Label(warning, systemImage: "exclamationmark.triangle")
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundStyle(Color.orange)
+                                    .padding(.horizontal, 24)
+                                    .padding(.top, 12)
+                            }
+                        }
+                        FormatFilterBar(
+                            filter: $filter,
+                            formats: pack.usedFormats
+                        )
+                        ScrollView {
+                            if formats.isEmpty {
+                                VStack(spacing: 10) {
+                                    Image(systemName: "line.3.horizontal.decrease.circle")
+                                        .font(.system(size: 26))
+                                    Text("这一类没有被使用的格式")
+                                        .font(.system(size: 13, weight: .medium))
+                                }
+                                .foregroundStyle(Palette.mutedInk)
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 74)
+                            } else {
+                                LazyVGrid(
+                                    columns: [GridItem(.adaptive(minimum: 270), spacing: 13)],
+                                    spacing: 13
+                                ) {
+                                    ForEach(formats) { format in
+                                        FormatCard(
+                                            format: format,
+                                            isSelected: model.selectedFormatID == format.id
+                                        ) {
+                                            model.selectedFormatID = format.id
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal, 24)
+                                .padding(.bottom, 28)
+                            }
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                     Divider().overlay(Palette.line)
 
                     StyleInspector(
-                        format: model.selectedFormat,
+                        format: formats.first(where: { $0.id == model.selectedFormatID }),
                         pageLayout: pack.pageLayout
                     )
                     .frame(width: 310)
                     .background(Color.white.opacity(0.34))
                 }
-
-                Divider().overlay(Palette.line)
-
-                HStack {
-                    Text(UIStrings.PreviewStep.privacy)
-                        .font(.system(size: 11))
-                        .foregroundStyle(Palette.mutedInk)
-                    Spacer()
-                }
-                .padding(.horizontal, 28)
-                .frame(height: 42)
             }
+            .sheet(isPresented: $isShowingStyleEditor) {
+                StyleEditorSheet(model: model, pack: pack)
+            }
+            .onAppear { reconcileSelection() }
+            .onChange(of: filter) { _ in reconcileSelection() }
+            .onChange(of: pack.libraryIdentity) { _ in reconcileSelection() }
         } else {
             EmptySelectionView { model.currentStep = 1 }
         }
     }
 
-    @ViewBuilder
-    private var formatGrid: some View {
-        ScrollView {
-            if formats.isEmpty {
-                VStack(spacing: 10) {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
-                        .font(.system(size: 26))
-                    Text(UIStrings.PreviewStep.emptyList)
-                        .font(.system(size: 13, weight: .medium))
-                }
-                .foregroundStyle(Palette.mutedInk)
-                .frame(maxWidth: .infinity)
-                .padding(.top, 74)
-            } else {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 270), spacing: 13)],
-                    spacing: 13
-                ) {
-                    ForEach(formats) { format in
-                        FormatCard(
-                            format: format,
-                            isSelected: model.selectedFormatID == format.id
-                        ) {
-                            model.selectedFormatID = format.id
-                        }
-                    }
-                }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 28)
-            }
-        }
-    }
-
-    private func summaryText(for pack: PackManifest) -> String {
-        pack.inferredCount > 0
-            ? UIStrings.PreviewStep.summaryWithInferred(
-                inferred: "\(pack.inferredCount)",
-                hidden: "\(pack.hiddenCount)"
-            )
-            : UIStrings.PreviewStep.summary(hidden: "\(pack.hiddenCount)")
+    private func reconcileSelection() {
+        model.selectedFormatID = FormatSelectionPolicy.selectedID(
+            current: model.selectedFormatID,
+            visibleIDs: formats.map(\.id)
+        )
     }
 }
 
-private struct PreviewNotices: View {
-    let pack: PackManifest
-
-    private var hasNotices: Bool {
-        pack.manualFormatting.paragraphCount > 0
-            || pack.manualFormatting.runCount > 0
-            || !(pack.headingNumberingConflicts ?? []).isEmpty
-            || !(pack.headingCompletionWarnings ?? []).isEmpty
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if pack.manualFormatting.paragraphCount > 0 || pack.manualFormatting.runCount > 0 {
-                ManualFormattingNotice(manual: pack.manualFormatting)
-            }
-            if let conflicts = pack.headingNumberingConflicts, !conflicts.isEmpty {
-                warningRow(UIStrings.PreviewStep.numberingConflict(count: "\(conflicts.count)"))
-            }
-            ForEach(pack.headingCompletionWarnings ?? [], id: \.self) { text in
-                warningRow(text)
-            }
-            if !hasNotices {
-                Label(UIStrings.PreviewStep.structureOk, systemImage: "checkmark.circle")
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(Palette.success)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 24)
-        .padding(.top, 12)
-    }
-
-    private func warningRow(_ text: String) -> some View {
-        Label(text, systemImage: "exclamationmark.triangle")
-            .font(.system(size: 11.5, weight: .medium))
-            .foregroundStyle(Palette.amber)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-private struct SummaryBar: View {
+struct SummaryBar: View {
     let pack: PackManifest
 
     var body: some View {
         HStack(spacing: 10) {
             MiniStat(
-                value: pack.inferredCount > 0
-                    ? "\(pack.usedStyleCount) + \(pack.inferredCount)"
-                    : "\(pack.usedStyleCount)",
-                label: pack.inferredCount > 0
-                    ? UIStrings.PreviewStep.statFormatsBoth
-                    : UIStrings.PreviewStep.statFormatsUsed,
+                value: "\(pack.usedStyleCount + (pack.inferredStyleCount ?? 0) + pack.resolvedCustomStyleCount)",
+                label: pack.resolvedCustomStyleCount > 0
+                    ? "格式总数（含自定义）"
+                    : ((pack.inferredStyleCount ?? 0) > 0 ? "实际 + 补全" : "实际使用"),
                 icon: "textformat"
             )
-            MiniStat(
-                value: "\(pack.documentSummary.paragraphCount)",
-                label: UIStrings.PreviewStep.statParagraphs,
-                icon: "paragraphsign"
-            )
-            MiniStat(
-                value: "\(pack.documentSummary.tableCount)",
-                label: UIStrings.PreviewStep.statTables,
-                icon: "tablecells"
-            )
-            MiniStat(
-                value: "\(pack.documentSummary.sectionCount)",
-                label: UIStrings.PreviewStep.statSections,
-                icon: "doc.text"
-            )
+            MiniStat(value: "\(pack.documentSummary.paragraphCount)", label: "段落", icon: "paragraphsign")
+            MiniStat(value: "\(pack.documentSummary.tableCount)", label: "表格", icon: "tablecells")
+            MiniStat(value: "\(pack.documentSummary.sectionCount)", label: "节", icon: "doc.text")
         }
         .padding(.horizontal, 24)
         .padding(.top, 16)
     }
 }
 
-private struct MiniStat: View {
+struct MiniStat: View {
     let value: String
     let label: String
     let icon: String
@@ -221,20 +215,17 @@ private struct MiniStat: View {
     }
 }
 
-private struct ManualFormattingNotice: View {
+struct ManualFormattingNotice: View {
     let manual: ManualFormatting
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "paintbrush.pointed")
                 .foregroundStyle(Palette.amber)
-            Text(UIStrings.PreviewStep.manualNotice(
-                paragraphs: "\(manual.paragraphCount)",
-                runs: "\(manual.runCount)"
-            ))
-            .font(.system(size: 11.5))
-            .foregroundStyle(Palette.ink.opacity(0.84))
-            .fixedSize(horizontal: false, vertical: true)
+            Text("发现 \(manual.paragraphCount) 个手工设置段落、\(manual.runCount) 处手工字符格式。它们不是可复用样式，因此不会出现在下方列表中；应用时会清理目标文档的手工视觉格式。")
+                .font(.system(size: 11.5))
+                .foregroundStyle(Palette.ink.opacity(0.84))
+                .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
         .padding(12)
@@ -243,7 +234,7 @@ private struct ManualFormattingNotice: View {
     }
 }
 
-private struct FormatFilterBar: View {
+struct FormatFilterBar: View {
     @Binding var filter: FormatFilter
     let formats: [UsedFormat]
 
@@ -254,23 +245,21 @@ private struct FormatFilterBar: View {
                     Button {
                         filter = item
                     } label: {
-                        Text(UIStrings.Filters.withCount(
-                            name: item.title,
-                            count: "\(formats.filter(item.includes).count)"
-                        ))
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(filter == item ? .white : Palette.mutedInk)
-                        .padding(.horizontal, 12)
-                        .frame(height: 31)
-                        .background(filter == item ? Palette.green : Color.white.opacity(0.66))
-                        .clipShape(Capsule())
-                        .overlay {
-                            if filter != item {
-                                Capsule().stroke(Palette.line, lineWidth: 1)
+                        Text("\(item.rawValue)  \(formats.filter(item.includes).count)")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(filter == item ? .white : Palette.mutedInk)
+                            .padding(.horizontal, 12)
+                            .frame(height: 31)
+                            .background(filter == item ? Palette.green : Color.white.opacity(0.66))
+                            .clipShape(Capsule())
+                            .overlay {
+                                if filter != item {
+                                    Capsule().stroke(Palette.line, lineWidth: 1)
+                                }
                             }
-                        }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(filter == item ? .isSelected : [])
                 }
             }
             .padding(.horizontal, 24)
@@ -279,7 +268,7 @@ private struct FormatFilterBar: View {
     }
 }
 
-private struct FormatCard: View {
+struct FormatCard: View {
     let format: UsedFormat
     let isSelected: Bool
     let action: () -> Void
@@ -298,7 +287,9 @@ private struct FormatCard: View {
                         .font(.system(size: 13, weight: .bold))
                         .lineLimit(1)
                     Spacer()
-                    Text(FormatDisplay.usage(format))
+                    Text(format.inferred == true
+                         ? (format.inferenceLabel ?? "智能补全")
+                         : "用过 \(format.usageCount) 次")
                         .font(.system(size: 9.5, weight: .semibold))
                         .foregroundStyle(Palette.green)
                         .padding(.horizontal, 7)
@@ -317,14 +308,12 @@ private struct FormatCard: View {
                     .background((format.tableFillHex.map(Color.init(hex:)) ?? Palette.paper).opacity(0.7))
                     .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 HStack(spacing: 6) {
-                    Text(FormatDisplay.badge(format))
-                        .font(.system(size: 9.5, weight: .bold))
-                        .foregroundStyle(Palette.green)
+                    TypeBadge(format: format)
                     if let font = format.fontEastAsia ?? format.fontLatin {
                         Text(font).lineLimit(1)
                     }
                     if let size = format.sizePt {
-                        Text(UIStrings.Inspector.sizeValue(size: number(size)))
+                        Text("\(number(size)) pt")
                     }
                 }
                 .font(.system(size: 10.5))
@@ -339,6 +328,7 @@ private struct FormatCard: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private func alignment(_ value: String?) -> Alignment {
@@ -346,6 +336,25 @@ private struct FormatCard: View {
         case "center": return .center
         case "right", "end": return .trailing
         default: return .leading
+        }
+    }
+}
+
+struct TypeBadge: View {
+    let format: UsedFormat
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 9.5, weight: .bold))
+            .foregroundStyle(Palette.green)
+    }
+
+    private var label: String {
+        if format.outlineLevel != nil { return "标题" }
+        switch format.type {
+        case "character": return "字符"
+        case "table": return "表格"
+        default: return "段落"
         }
     }
 }

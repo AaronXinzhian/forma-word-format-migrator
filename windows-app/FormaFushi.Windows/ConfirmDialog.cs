@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 (未检出外部依赖)
+ * [OUTPUT]: 提供 ConfirmDialog
+ * [POS]: 提供中文确认弹窗与安全默认取消
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 namespace FormaFushi.Windows;
 
 /// <summary>

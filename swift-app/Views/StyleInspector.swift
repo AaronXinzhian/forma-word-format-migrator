@@ -1,102 +1,11 @@
+// [INPUT]: 依赖 AppKit, Darwin, SwiftUI, UniformTypeIdentifiers
+// [OUTPUT]: 提供StyleInspector 中的类型与接口
+// [POS]: Mac 原生终端 - 格式属性检查器及页面布局卡片
+// [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+import AppKit
+import Darwin
 import SwiftUI
-
-/// 格式属性的取值逻辑集中在这里，Windows 端 `FormatDisplay.cs` 与之一一对应。
-enum FormatDisplay {
-    static func usage(_ format: UsedFormat) -> String {
-        format.inferred == true
-            ? (format.inferenceLabel ?? UIStrings.FormatList.usageInferred)
-            : UIStrings.FormatList.usageCount(count: "\(format.usageCount)")
-    }
-
-    static func source(_ format: UsedFormat) -> String {
-        format.inferred == true
-            ? (format.inferenceLabel ?? UIStrings.FormatList.usageInferred)
-            : UIStrings.Inspector.sourceUsedCount(count: "\(format.usageCount)")
-    }
-
-    static func badge(_ format: UsedFormat) -> String {
-        if format.outlineLevel != nil { return UIStrings.FormatList.badgeHeading }
-        switch format.type {
-        case "character": return UIStrings.FormatList.badgeCharacter
-        case "table": return UIStrings.FormatList.badgeTable
-        default: return UIStrings.FormatList.badgeParagraph
-        }
-    }
-
-    static func type(_ format: UsedFormat) -> String {
-        if let level = format.outlineLevel {
-            return UIStrings.Inspector.typeHeading(level: "\(level + 1)")
-        }
-        switch format.type {
-        case "character": return UIStrings.Inspector.typeCharacter
-        case "table": return UIStrings.Inspector.typeTable
-        default: return UIStrings.Inspector.typeParagraph
-        }
-    }
-
-    static func traits(_ format: UsedFormat) -> String {
-        var traits: [String] = []
-        if format.bold == true { traits.append(UIStrings.Inspector.traitBold) }
-        if format.italic == true { traits.append(UIStrings.Inspector.traitItalic) }
-        return traits.isEmpty
-            ? UIStrings.Inspector.traitRegular
-            : traits.joined(separator: UIStrings.Inspector.traitSeparator)
-    }
-
-    static func alignment(_ value: String?) -> String {
-        switch value {
-        case "center": return UIStrings.Inspector.alignCenter
-        case "right", "end": return UIStrings.Inspector.alignRight
-        case "both": return UIStrings.Inspector.alignJustify
-        case "distribute": return UIStrings.Inspector.alignDistribute
-        case "left", "start": return UIStrings.Inspector.alignLeft
-        default: return UIStrings.Inspector.inherit
-        }
-    }
-
-    static func spacing(_ format: UsedFormat) -> String {
-        guard format.spaceBeforePt != nil || format.spaceAfterPt != nil else {
-            return UIStrings.Inspector.inherit
-        }
-        return UIStrings.Inspector.spacingValue(
-            before: number(format.spaceBeforePt ?? 0),
-            after: number(format.spaceAfterPt ?? 0)
-        )
-    }
-
-    static func lineSpacing(_ format: UsedFormat) -> String {
-        guard let value = format.lineSpacing else { return UIStrings.Inspector.inherit }
-        if format.lineRule == nil || format.lineRule == "auto" {
-            return UIStrings.Inspector.lineSpacingMultiple(value: number(value))
-        }
-        return UIStrings.Inspector.lineSpacingExact(value: number(value))
-    }
-
-    static func numbering(_ format: UsedFormat) -> String {
-        guard format.numbered else { return UIStrings.Inspector.numberingNone }
-        if let example = format.numberingExample ?? format.numberingPattern {
-            return UIStrings.Inspector.numberingWithExample(example: example)
-        }
-        return UIStrings.Inspector.numberingPlain
-    }
-
-    static func fontSummary(_ format: UsedFormat) -> String {
-        let family = format.fontEastAsia ?? format.fontLatin ?? UIStrings.FormatList.inheritFont
-        let size = format.sizePt.map { UIStrings.Inspector.sizeValue(size: number($0)) }
-            ?? UIStrings.FormatList.inheritSize
-        return "\(family) / \(size)"
-    }
-
-    static func hex(_ value: String?) -> String {
-        guard let value, !value.isEmpty else { return UIStrings.Inspector.inherit }
-        return "#\(value)"
-    }
-
-    static func optional(_ value: String?) -> String {
-        guard let value, !value.isEmpty else { return UIStrings.Inspector.inherit }
-        return value
-    }
-}
+import UniformTypeIdentifiers
 
 struct StyleInspector: View {
     let format: UsedFormat?
@@ -105,13 +14,84 @@ struct StyleInspector: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text(UIStrings.Inspector.title)
+                Text("格式属性")
                     .font(.system(size: 16, weight: .bold))
                 if let format {
-                    preview(format)
-                    properties(format)
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(format.sample)
+                            .font(inspectorFont(format))
+                            .fontWeight(format.bold == true ? .bold : .regular)
+                            .italic(format.italic == true)
+                            .foregroundStyle(format.colorHex.map(Color.init(hex:)) ?? Palette.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(format.name)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Palette.mutedInk)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 84, alignment: .leading)
+                    .padding(14)
+                    .background(Color.white.opacity(0.78))
+                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+
+                    VStack(spacing: 0) {
+                        PropertyRow(label: "类型", value: typeText(format))
+                        PropertyRow(
+                            label: "来源",
+                            value: format.inferred == true
+                                ? (format.inferenceLabel ?? "智能补全")
+                                : "源文档实际使用 \(format.usageCount) 次"
+                        )
+                        PropertyRow(label: "中文字体", value: format.fontEastAsia ?? "继承主题")
+                        PropertyRow(label: "西文字体", value: format.fontLatin ?? "继承主题")
+                        PropertyRow(label: "字号", value: format.sizePt.map { "\(number($0)) pt" } ?? "继承")
+                        PropertyRow(label: "字形", value: fontTraits(format))
+                        PropertyRow(label: "颜色", value: format.colorHex.map { "#\($0)" } ?? "自动")
+                        if format.type == "paragraph" {
+                            PropertyRow(
+                                label: "对齐",
+                                value: paragraphAlignmentText(format.alignment)
+                            )
+                            PropertyRow(
+                                label: "段前 / 段后",
+                                value: paragraphSpacingText(
+                                    before: format.spaceBeforePt,
+                                    after: format.spaceAfterPt
+                                )
+                            )
+                            PropertyRow(
+                                label: "行距",
+                                value: paragraphLineSpacingText(
+                                    value: format.lineSpacing,
+                                    rule: format.lineRule
+                                )
+                            )
+                            PropertyRow(
+                                label: "左 / 右缩进",
+                                value: paragraphIndentSidesText(format)
+                            )
+                            PropertyRow(
+                                label: "特殊缩进",
+                                value: paragraphSpecialIndentText(format)
+                            )
+                            if let level = format.outlineLevel {
+                                PropertyRow(label: "大纲级别", value: "\(level + 1) 级")
+                            }
+                            PropertyRow(
+                                label: "编号",
+                                value: format.numbered
+                                    ? format.numberingExample.map { "是（示意：\($0)）" } ?? "是"
+                                    : "否"
+                            )
+                        }
+                        if format.type == "table" {
+                            PropertyRow(label: "表格底色", value: hexText(format.tableFillHex))
+                            PropertyRow(label: "强调色", value: hexText(format.tableAccentHex))
+                        }
+                    }
+                    .background(Color.white.opacity(0.55))
+                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
                 } else {
-                    Text(UIStrings.Inspector.empty)
+                    Text("选择一张格式卡片查看详细属性。")
                         .font(.system(size: 12))
                         .foregroundStyle(Palette.mutedInk)
                 }
@@ -123,89 +103,32 @@ struct StyleInspector: View {
         }
     }
 
-    private func preview(_ format: UsedFormat) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(format.sample)
-                .font(inspectorFont(format))
-                .fontWeight(format.bold == true ? .bold : .regular)
-                .italic(format.italic == true)
-                .foregroundStyle(format.colorHex.map(Color.init(hex:)) ?? Palette.ink)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(format.name)
-                .font(.system(size: 11))
-                .foregroundStyle(Palette.mutedInk)
-        }
-        .frame(maxWidth: .infinity, minHeight: 84, alignment: .leading)
-        .padding(14)
-        .background(Color.white.opacity(0.78))
-        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-    }
-
-    @ViewBuilder
-    private func properties(_ format: UsedFormat) -> some View {
-        VStack(spacing: 0) {
-            PropertyRow(label: UIStrings.Inspector.labelType, value: FormatDisplay.type(format))
-            PropertyRow(label: UIStrings.Inspector.labelSource, value: FormatDisplay.source(format))
-            PropertyRow(
-                label: UIStrings.Inspector.labelFontEastAsia,
-                value: FormatDisplay.optional(format.fontEastAsia)
-            )
-            PropertyRow(
-                label: UIStrings.Inspector.labelFontLatin,
-                value: FormatDisplay.optional(format.fontLatin)
-            )
-            PropertyRow(
-                label: UIStrings.Inspector.labelSize,
-                value: format.sizePt.map { UIStrings.Inspector.sizeValue(size: number($0)) }
-                    ?? UIStrings.Inspector.inherit
-            )
-            PropertyRow(label: UIStrings.Inspector.labelTraits, value: FormatDisplay.traits(format))
-            PropertyRow(label: UIStrings.Inspector.labelColor, value: FormatDisplay.hex(format.colorHex))
-            if format.type == "paragraph" {
-                PropertyRow(
-                    label: UIStrings.Inspector.labelAlignment,
-                    value: FormatDisplay.alignment(format.alignment)
-                )
-                PropertyRow(
-                    label: UIStrings.Inspector.labelSpacing,
-                    value: FormatDisplay.spacing(format)
-                )
-                PropertyRow(
-                    label: UIStrings.Inspector.labelLineSpacing,
-                    value: FormatDisplay.lineSpacing(format)
-                )
-                if let level = format.outlineLevel {
-                    PropertyRow(
-                        label: UIStrings.Inspector.labelOutline,
-                        value: UIStrings.Inspector.outlineValue(level: "\(level + 1)")
-                    )
-                }
-                PropertyRow(
-                    label: UIStrings.Inspector.labelNumbering,
-                    value: FormatDisplay.numbering(format)
-                )
-            }
-            if format.type == "table" {
-                PropertyRow(
-                    label: UIStrings.Inspector.labelTableFill,
-                    value: FormatDisplay.hex(format.tableFillHex)
-                )
-                PropertyRow(
-                    label: UIStrings.Inspector.labelTableAccent,
-                    value: FormatDisplay.hex(format.tableAccentHex)
-                )
-            }
-        }
-        .background(Color.white.opacity(0.55))
-        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-    }
-
     private func inspectorFont(_ format: UsedFormat) -> Font {
         let size = min(max(format.sizePt ?? 14, 11), 24)
         if let name = format.fontEastAsia ?? format.fontLatin {
             return .custom(name, size: size)
         }
         return .system(size: size)
+    }
+
+    private func typeText(_ format: UsedFormat) -> String {
+        if let level = format.outlineLevel { return "\(level + 1) 级标题" }
+        switch format.type {
+        case "character": return "字符样式"
+        case "table": return "表格样式"
+        default: return "段落样式"
+        }
+    }
+
+    private func fontTraits(_ format: UsedFormat) -> String {
+        var traits: [String] = []
+        if format.bold == true { traits.append("粗体") }
+        if format.italic == true { traits.append("斜体") }
+        return traits.isEmpty ? "常规" : traits.joined(separator: "、")
+    }
+
+    private func hexText(_ value: String?) -> String {
+        value.map { "#\($0)" } ?? "—"
     }
 }
 
@@ -238,12 +161,10 @@ struct PageLayoutCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(UIStrings.Inspector.pageTitle)
+                Text("页面设置")
                     .font(.system(size: 14, weight: .bold))
                 Spacer()
-                Text(layout.orientation == "landscape"
-                     ? UIStrings.Inspector.pageOrientationLandscape
-                     : UIStrings.Inspector.pageOrientationPortrait)
+                Text(layout.orientation == "landscape" ? "横向" : "纵向")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Palette.green)
                     .padding(.horizontal, 8)
@@ -264,14 +185,8 @@ struct PageLayoutCard: View {
                 .frame(width: layout.orientation == "landscape" ? 74 : 52)
                 VStack(alignment: .leading, spacing: 5) {
                     Text(pageSize)
-                    Text(UIStrings.Inspector.pageMarginVertical(
-                        top: centimeters(layout.marginTopCM),
-                        bottom: centimeters(layout.marginBottomCM)
-                    ))
-                    Text(UIStrings.Inspector.pageMarginHorizontal(
-                        left: centimeters(layout.marginLeftCM),
-                        right: centimeters(layout.marginRightCM)
-                    ))
+                    Text("上 / 下：\(cm(layout.marginTopCM)) / \(cm(layout.marginBottomCM))")
+                    Text("左 / 右：\(cm(layout.marginLeftCM)) / \(cm(layout.marginRightCM))")
                 }
                 .font(.system(size: 10.5))
                 .foregroundStyle(Palette.mutedInk)
@@ -287,14 +202,11 @@ struct PageLayoutCard: View {
     }
 
     private var pageSize: String {
-        guard let width = layout.widthCM, let height = layout.heightCM else {
-            return UIStrings.Inspector.pageSizeDefault
-        }
-        return UIStrings.Inspector.pageSizeValue(width: number(width), height: number(height))
+        guard let width = layout.widthCM, let height = layout.heightCM else { return "使用文档默认页面" }
+        return "\(number(width)) × \(number(height)) cm"
     }
 
-    private func centimeters(_ value: Double?) -> String {
-        value.map { UIStrings.Inspector.centimeterValue(value: number($0)) }
-            ?? UIStrings.Inspector.inherit
+    private func cm(_ value: Double?) -> String {
+        value.map { "\(number($0)) cm" } ?? "—"
     }
 }

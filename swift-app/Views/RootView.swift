@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 AppKit, SwiftUI
+ * [OUTPUT]: 提供 WordFormatLibraryView, AppHeader, StepStrip, ToastBar, EmptySelectionView
+ * [POS]: Mac 三步工作流容器、格式库侧栏、忙碌遮罩及通知反馈
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 import AppKit
 import SwiftUI
 
@@ -30,18 +36,27 @@ struct WordFormatLibraryView: View {
                     ToastBar(message: toast) { model.toastMessage = nil }
                 }
             }
+            .disabled(model.isBusy)
+            .accessibilityHidden(model.isBusy)
 
             if model.isBusy {
-                BusyOverlay(message: model.busyMessage)
+                BusyOverlay(
+                    message: model.busyMessage,
+                    canCancel: model.canCancelBusyOperation,
+                    isCancelling: model.isCancelling,
+                    cancel: model.cancelCurrentOperation
+                )
             }
         }
         .frame(minWidth: 1080, minHeight: 720)
         .foregroundStyle(Palette.ink)
+        .focusedSceneObject(model)
         .alert(UIStrings.App.errorTitle, isPresented: $model.isShowingError) {
             Button(UIStrings.App.errorConfirm) { model.isShowingError = false }
         } message: {
             Text(model.errorMessage)
         }
+        .onDisappear { model.stopBackgroundWork() }
     }
 }
 
@@ -176,28 +191,5 @@ struct EmptySelectionView: View {
                 .buttonStyle(PrimaryButtonStyle())
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-struct BusyOverlay: View {
-    let message: String
-
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.16).ignoresSafeArea()
-            VStack(spacing: 13) {
-                ProgressView()
-                    .controlSize(.large)
-                    .tint(Palette.green)
-                Text(message)
-                    .font(.system(size: 13, weight: .semibold))
-                    .multilineTextAlignment(.center)
-            }
-            .padding(.horizontal, 30)
-            .frame(minWidth: 260, minHeight: 116)
-            .background(.ultraThickMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .shadow(color: .black.opacity(0.16), radius: 24, y: 10)
-        }
     }
 }

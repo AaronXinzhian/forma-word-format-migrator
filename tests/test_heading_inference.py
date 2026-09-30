@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, sys, tempfile, unittest, zipfile, pathlib, typing, lxml, make_fixtures, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, NS, HEADING_TEXT, VISUAL_RUN_PROPERTIES, qn(), read_zip(), xml(), style_for_id(), paragraph_for_text(), effective_style_properties(), bool_value(), half_points(), twips(), effective_numbering_for_paragraph(), HeadingInferenceTests
+# [POS]: 验证标题层级补全的字体、尺寸、段落及编号逻辑
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Regression coverage for synthesizing missing Heading 4/5 definitions."""
 
 from __future__ import annotations

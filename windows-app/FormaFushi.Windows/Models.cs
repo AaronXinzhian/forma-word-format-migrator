@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 System.Text.Json.Serialization, FormaFushi.Windows.Generated
+ * [OUTPUT]: 提供 AppFailure, ManagerEnvelope, LibraryReadError, PackManifest, UsedFormat, ManualFormatting, DocumentSummary, PageLayout, TransferStats
+ * [POS]: 解码共享迁移引擎输出为 Windows 模型
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 using System.Text.Json.Serialization;
 using FormaFushi.Windows.Generated;
 

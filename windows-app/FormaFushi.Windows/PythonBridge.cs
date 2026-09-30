@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 System.Diagnostics, System.Text, System.Text.Json, FormaFushi.Windows.Generated
+ * [OUTPUT]: 提供 PythonBridge
+ * [POS]: 桥接 Windows 包内 Python 与 UTF-8 结构化输出
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;

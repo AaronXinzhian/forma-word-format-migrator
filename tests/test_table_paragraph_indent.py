@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, copy, sys, tempfile, unittest, zipfile, pathlib, lxml, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, NS, W_VAL, _CUSTOM_BODY_STYLE_SPECS, TableParagraphIndentTests
+# [POS]: 验证表格两字符首行缩进清理和重复应用稳定性
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Regression coverage for the table-only two-character indent cleanup."""
 
 from __future__ import annotations
@@ -98,6 +102,42 @@ def _set_two_character_indent_fixture(paragraph: etree._Element) -> None:
 
 def _canonical(node: etree._Element) -> bytes:
     return etree.tostring(node, method="c14n", exclusive=True)
+
+
+def _canonical_with_normalized_num_id(node: etree._Element) -> bytes:
+    """Compare paragraph semantics while allowing collision-safe numId remaps."""
+    normalized = copy.deepcopy(node)
+    for num_id in normalized.xpath(".//w:numPr/w:numId", namespaces=NS):
+        num_id.set(W_VAL, "__remapped__")
+    return _canonical(normalized)
+
+
+def _resolved_numbering_reference(
+    paragraph: etree._Element,
+    numbering: etree._Element,
+) -> tuple[str, etree._Element, etree._Element]:
+    values = paragraph.xpath("w:pPr/w:numPr/w:numId/@w:val", namespaces=NS)
+    if len(values) != 1:
+        raise AssertionError("paragraph must have exactly one direct numId")
+    num_id = str(values[0])
+    concrete = numbering.xpath(
+        "./w:num[@w:numId=$num_id]",
+        namespaces=NS,
+        num_id=num_id,
+    )
+    if len(concrete) != 1:
+        raise AssertionError("numId does not resolve: %s" % num_id)
+    abstract_id = concrete[0].xpath(
+        "string(w:abstractNumId/@w:val)", namespaces=NS
+    )
+    abstract = numbering.xpath(
+        "./w:abstractNum[@w:abstractNumId=$abstract_id]",
+        namespaces=NS,
+        abstract_id=abstract_id,
+    )
+    if len(abstract) != 1:
+        raise AssertionError("abstractNum does not resolve: %s" % abstract_id)
+    return num_id, concrete[0], abstract[0]
 
 
 def _expected_ppr_after_indent_cleanup(paragraph: etree._Element) -> bytes:
@@ -479,8 +519,12 @@ class TableParagraphIndentTests(unittest.TestCase):
             cls.target_path,
             cls.no_table_output,
         )
+        cls.no_table_entries = _read_zip(cls.no_table_output)
         cls.no_table_root = etree.fromstring(
-            _read_zip(cls.no_table_output)["word/document.xml"]
+            cls.no_table_entries["word/document.xml"]
+        )
+        cls.no_table_numbering_root = etree.fromstring(
+            cls.no_table_entries["word/numbering.xml"]
         )
         cls.no_table_second_output = (
             cls.working_dir / "no-table-output-second-pass.docx"
@@ -504,8 +548,12 @@ class TableParagraphIndentTests(unittest.TestCase):
             cls.target_path,
             cls.with_table_output,
         )
+        cls.with_table_entries = _read_zip(cls.with_table_output)
         cls.with_table_root = etree.fromstring(
-            _read_zip(cls.with_table_output)["word/document.xml"]
+            cls.with_table_entries["word/document.xml"]
+        )
+        cls.with_table_numbering_root = etree.fromstring(
+            cls.with_table_entries["word/numbering.xml"]
         )
 
         # A template can legitimately provide a table style while its Normal
@@ -648,6 +696,9 @@ class TableParagraphIndentTests(unittest.TestCase):
         cls.inherited_root = etree.fromstring(
             inherited_entries["word/document.xml"]
         )
+        cls.inherited_numbering_root = etree.fromstring(
+            inherited_entries["word/numbering.xml"]
+        )
         cls.inherited_styles_root = etree.fromstring(
             inherited_entries["word/styles.xml"]
         )
@@ -677,7 +728,16 @@ class TableParagraphIndentTests(unittest.TestCase):
         )
         ppr = paragraph.find("w:pPr", namespaces=NS)
         self.assertIsNotNone(ppr)
-        self.assertEqual(_canonical(ppr), self.expected_table_ppr)
+        self.assertEqual(
+            _canonical_with_normalized_num_id(ppr),
+            _canonical_with_normalized_num_id(
+                etree.fromstring(self.expected_table_ppr)
+            ),
+        )
+        remapped_num_id, _concrete, _abstract = _resolved_numbering_reference(
+            paragraph, self.no_table_numbering_root
+        )
+        self.assertNotEqual(remapped_num_id, "5")
 
         indentation = ppr.find("w:ind", namespaces=NS)
         self.assertEqual(
@@ -716,8 +776,9 @@ class TableParagraphIndentTests(unittest.TestCase):
             ppr.xpath("w:numPr/w:ilvl/@w:val", namespaces=NS), ["0"]
         )
         self.assertEqual(
-            ppr.xpath("w:numPr/w:numId/@w:val", namespaces=NS), ["5"]
+            len(ppr.xpath("w:numPr/w:numId/@w:val", namespaces=NS)), 1
         )
+        _resolved_numbering_reference(paragraph, self.no_table_numbering_root)
 
     def test_table_free_source_does_not_remove_other_indent_sizes(self) -> None:
         paragraph = _paragraph_for_text(
@@ -761,15 +822,15 @@ class TableParagraphIndentTests(unittest.TestCase):
             self.no_table_root.xpath("//w:tcPr/w:gridSpan", namespaces=NS)
         )
 
-    def test_body_paragraphs_keep_existing_full_format_replacement(self) -> None:
+    def test_body_paragraphs_clear_visual_format_but_keep_list_semantics(self) -> None:
         paragraph = _paragraph_for_text(
             self.no_table_root, self.body_paragraph_text
         )
         ppr = paragraph.find("w:pPr", namespaces=NS)
-        if ppr is not None:
-            self.assertFalse(
-                ppr.xpath("w:ind | w:jc | w:spacing | w:numPr", namespaces=NS)
-            )
+        self.assertIsNotNone(ppr)
+        self.assertFalse(ppr.xpath("w:ind | w:jc | w:spacing", namespaces=NS))
+        self.assertTrue(ppr.xpath("w:numPr", namespaces=NS))
+        _resolved_numbering_reference(paragraph, self.no_table_numbering_root)
 
     def test_inherited_two_character_indent_is_neutralized_in_plain_table_cell(self) -> None:
         paragraph = _paragraph_for_text(
@@ -1012,7 +1073,13 @@ class TableParagraphIndentTests(unittest.TestCase):
         )
         ppr = paragraph.find("w:pPr", namespaces=NS)
         self.assertIsNotNone(ppr)
-        self.assertEqual(_canonical(ppr), self.original_numbered_ppr)
+        self.assertEqual(
+            _canonical_with_normalized_num_id(ppr),
+            _canonical_with_normalized_num_id(
+                etree.fromstring(self.original_numbered_ppr)
+            ),
+        )
+        _resolved_numbering_reference(paragraph, self.inherited_numbering_root)
         self.assertFalse(ppr.xpath("w:ind", namespaces=NS))
 
     def test_inherited_indent_neutralization_skips_hanging_indent(self) -> None:
@@ -1039,20 +1106,42 @@ class TableParagraphIndentTests(unittest.TestCase):
             )
 
     def test_inherited_indent_neutralization_skips_direct_outline_levels(self) -> None:
+        catalog = core.build_style_catalog(
+            core.serialize_xml(self.inherited_styles_root),
+            core.serialize_xml(self.inherited_root)
+        )
         for level, text in enumerate(self.direct_outline_texts):
             with self.subTest(level=level):
                 paragraph = _paragraph_for_text(self.inherited_root, text)
                 self.assertTrue(
                     paragraph.xpath("ancestor::w:tbl", namespaces=NS)
                 )
+                # Heading mapping may replace a direct outlineLvl with the
+                # template's real heading style.  Protect effective semantics,
+                # not the obsolete storage representation.
                 self.assertEqual(
-                    paragraph.xpath(
-                        "w:pPr/w:outlineLvl/@w:val", namespaces=NS
-                    ),
-                    [str(level)],
+                    core.paragraph_outline_level(
+                        paragraph.find("w:pPr", namespaces=NS), catalog
+                    ), level,
+                )
+                style_id = _paragraph_style_id(
+                    paragraph, self.inherited_styles_root
+                )
+                self.assertFalse(
+                    style_id.startswith(core.TABLE_NO_FIRST_LINE_STYLE_PREFIX)
                 )
                 self.assertFalse(
                     paragraph.xpath("w:pPr/w:ind", namespaces=NS)
+                )
+                second = _paragraph_for_text(self.inherited_second_root, text)
+                second_catalog = core.build_style_catalog(
+                    core.serialize_xml(self.inherited_second_styles_root),
+                    core.serialize_xml(self.inherited_second_root)
+                )
+                self.assertEqual(
+                    core.paragraph_outline_level(
+                        second.find("w:pPr", namespaces=NS), second_catalog
+                    ), level,
                 )
 
     def test_repeated_application_is_idempotent_for_table_indentation(self) -> None:
@@ -1110,15 +1199,15 @@ class TableParagraphIndentTests(unittest.TestCase):
         self.assertLess(child_names.index("numPr"), child_names.index("ind"))
         self.assertLess(child_names.index("numPr"), child_names.index("jc"))
 
-    def test_source_with_used_table_style_keeps_existing_full_cleanup(self) -> None:
+    def test_source_with_used_table_style_cleans_visuals_but_keeps_list(self) -> None:
         paragraph = _paragraph_for_text(
             self.with_table_root, self.table_paragraph_text
         )
         ppr = paragraph.find("w:pPr", namespaces=NS)
-        if ppr is not None:
-            self.assertFalse(
-                ppr.xpath("w:ind | w:jc | w:spacing | w:numPr", namespaces=NS)
-            )
+        self.assertIsNotNone(ppr)
+        self.assertFalse(ppr.xpath("w:ind | w:jc | w:spacing", namespaces=NS))
+        self.assertTrue(ppr.xpath("w:numPr", namespaces=NS))
+        _resolved_numbering_reference(paragraph, self.with_table_numbering_root)
         self.assertEqual(
             self.with_table_root.xpath(
                 "//w:tblPr/w:tblStyle/@w:val", namespaces=NS

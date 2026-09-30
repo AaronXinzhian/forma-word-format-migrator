@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 Foundation
+ * [OUTPUT]: 提供 LibraryLocation
+ * [POS]: Mac 格式库路径解析与旧目录到 FormaFushi 的兼容迁移
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 import Foundation
 
 /// 解析格式库目录，并把 2.6 之前留在旧目录名下的格式库迁移过来。

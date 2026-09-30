@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main, master]
@@ -15,9 +18,9 @@ jobs:
     name: 界面文案单一来源同步性
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.13'
 
@@ -28,7 +31,6 @@ jobs:
   python-tests:
     name: 文档引擎回归 (${{ matrix.os }} / Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -39,16 +41,14 @@ jobs:
             python-version: '3.14'
           - os: macos-latest
             python-version: '3.13'
-          # Windows 便携包内置 Python 3.14.x（见 scripts/build_windows_app.sh）。
-          # 引擎此前从未在 Windows 上跑过自动化测试，先以非阻断方式收集结果。
+          # Windows 引擎验证是必过门禁，不能用 experimental 隐藏失败。
           - os: windows-latest
             python-version: '3.14'
-            experimental: true
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -64,9 +64,11 @@ jobs:
 
   swift-checks:
     name: Mac 客户端编译与行为测试
-    runs-on: macos-latest
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: 收集 Swift 源文件
         id: sources
@@ -77,14 +79,17 @@ jobs:
       - name: 编译并运行 Swift 行为测试
         run: |
           mkdir -p build/ci
-          for suite in PackDeletionPolicyTests LibraryLocationTests; do
+          sdk_path=$(xcrun --sdk macosx26.5 --show-sdk-path)
+          for suite_file in tests/*Tests.swift; do
+            suite=$(basename "$suite_file" .swift)
             xcrun swiftc \
+              -sdk "$sdk_path" \
               -parse-as-library \
               -D WORD_FORMAT_LIBRARY_TESTING \
               -target arm64-apple-macos13.0 \
               -module-cache-path "build/ci/module-cache-${suite}" \
               ${{ steps.sources.outputs.list }} \
-              "tests/${suite}.swift" \
+              "$suite_file" \
               -o "build/ci/${suite}"
             "./build/ci/${suite}"
           done
@@ -93,6 +98,7 @@ jobs:
         run: |
           for target in arm64-apple-macos13.0 x86_64-apple-macos13.0; do
             xcrun swiftc \
+              -sdk "$(xcrun --sdk macosx26.5 --show-sdk-path)" \
               -O \
               -parse-as-library \
               -target "$target" \
@@ -105,21 +111,26 @@ jobs:
     name: Windows 客户端编译与删除策略测试
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-dotnet@v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '10.0.302'
 
-      - name: 编译 WinForms 客户端
-        run: dotnet build windows-app/FormaFushi.Windows/FormaFushi.Windows.csproj -c Release
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.14'
 
-      # 与 macOS 侧 tests/PackDeletionPolicyTests.swift 的 12 项检查一一对应。
-      # --strict 禁止「本机不支持所以跳过」，CI 上符号链接与回收站都必须真的跑过。
-      - name: 运行 WindowsPackDeletionPolicyTests
-        run: dotnet run --project tests/WindowsPackDeletionPolicyTests/WindowsPackDeletionPolicyTests.csproj -c Release -- --strict
+      - name: 安装测试依赖
+        run: python -m pip install -r requirements-dev.txt
 
-      # 冒烟工具需要打包后的 runtime/ resources/ smoke-fixtures/ 布局才能运行，
-      # CI 里只做编译检查，实际执行仍依赖 scripts/build_windows_app.sh 的产物。
-      - name: 编译 Windows 冒烟工具
-        run: dotnet build tests/WindowsSmokeHarness/WindowsSmokeHarness.csproj -c Release
+      - name: 构建并实际验证 Windows 便携包
+        shell: pwsh
+        run: ./scripts/build_windows_app.ps1 -OutputDirectory build/ci-windows-output
+
+      - name: 保留验证包和运行证据
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-local-unsigned-verified
+          path: build/ci-windows-output/
+          if-no-files-found: error

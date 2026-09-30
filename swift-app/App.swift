@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 AppKit, SwiftUI
+ * [OUTPUT]: 提供 AppDelegate, WordFormatLibraryApp
+ * [POS]: Mac 应用入口、处理中退出确认与原生文件和格式库命令菜单
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 import AppKit
 import SwiftUI
 
@@ -38,8 +44,49 @@ struct WordFormatLibraryApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unifiedCompact)
         .commands {
-            CommandGroup(replacing: .newItem) { }
+            FormaCommands()
         }
     }
 }
 #endif
+
+struct FormaCommands: Commands {
+    @FocusedObject private var model: WordFormatLibraryModel?
+    private var canChoose: Bool { model != nil && model?.isBusy != true && model?.isEditingFormat != true }
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("从 Word 导入格式…") {
+                if let model, let url = FilePanels.chooseSource() { Task { await model.importSource(url) } }
+            }.keyboardShortcut("o").disabled(!canChoose)
+            Button("导入格式方案…") {
+                if let model, let url = FilePanels.choosePack() { Task { await model.importPack(url) } }
+            }.keyboardShortcut("o", modifiers: [.command, .shift]).disabled(!canChoose)
+        }
+        CommandGroup(replacing: .saveItem) {
+            Button("导出选中格式方案…") {
+                if let model, let pack = model.selectedPack, let url = FilePanels.exportDestination(for: pack) {
+                    Task { await model.exportPack(pack, to: url) }
+                }
+            }.disabled(model?.selectedPack == nil || !canChoose)
+            Button("另存并应用格式…") {
+                if let model, let target = model.targetURL, let destination = FilePanels.chooseDestination(basedOn: target) {
+                    Task { await model.applyPack(savingTo: destination) }
+                }
+            }.keyboardShortcut("s", modifiers: [.command, .shift]).disabled(model?.canApplyPreflight != true || !canChoose)
+        }
+        CommandMenu("格式库") {
+            Button("选择目标 Word 文件…") {
+                if let model, let url = FilePanels.chooseTarget() { model.currentStep = 3; model.chooseTarget(url) }
+            }.keyboardShortcut("t").disabled(model?.selectedPack == nil || !canChoose)
+            Button("刷新格式库") {
+                if let model { Task { await model.reloadLibrary() } }
+            }.keyboardShortcut("r").disabled(!canChoose)
+            Button("重新预检") {
+                if let model { Task { await model.refreshPreflight() } }
+            }.disabled(model?.targetURL == nil || !canChoose)
+            Button("取消当前处理") { model?.cancelCurrentOperation() }
+                .disabled(model?.canCancelBusyOperation != true)
+        }
+    }
+}

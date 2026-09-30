@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Regression coverage for the optional one-level heading demotion mode."""
+"""Regression coverage for the optional one-level heading demotion mode.
+
+[INPUT]: 依赖 __future__, contextlib, io, inspect, sys, tempfile, unittest, zipfile, pathlib, typing, docx, docx.oxml, docx.oxml.ns, docx.shared, lxml, style_pack_manager, word_style_transfer
+[OUTPUT]: 验证样式与直接大纲标题映射、编号、单次降级及正文和表格保护
+[POS]: 标题格式回归测试，通过真实格式包应用与直接迁移验证内容语义
+[PROTOCOL]: 变更时更新此头部，然后检查上级 FOLDER_INDEX.md
+"""
 
 from __future__ import annotations
 
@@ -209,6 +215,26 @@ def _make_prefixed_demotion_target(path: Path) -> None:
         paragraph.add_run(title)
     doc.add_paragraph("正文保留 1.1.1 和 2026 数字。")
     doc.save(path)
+
+
+def _set_direct_outline(paragraph: object, value: object) -> None:
+    properties = paragraph._element.get_or_add_pPr()
+    outline = properties.find(docx_qn("w:outlineLvl"))
+    if outline is None:
+        outline = OxmlElement("w:outlineLvl")
+        properties.append(outline)
+    outline.set(docx_qn("w:val"), str(value))
+
+
+def _set_explicit_normal_style(paragraph: object) -> None:
+    # python-docx removes pStyle when assigning its default Normal style.
+    # Insert it explicitly so this fixture exercises Normal + outlineLvl.
+    properties = paragraph._element.get_or_add_pPr()
+    style = properties.find(docx_qn("w:pStyle"))
+    if style is None:
+        style = OxmlElement("w:pStyle")
+        properties.insert(0, style)
+    style.set(docx_qn("w:val"), "Normal")
 
 
 def read_zip(path: Path) -> Dict[str, bytes]:
@@ -497,6 +523,294 @@ class HeadingDemotionTests(unittest.TestCase):
                 ),
                 1,
             )
+
+    def test_direct_outline_headings_receive_source_styles_and_numbering(self) -> None:
+        target = self.working_dir / "outline-only-target.docx"
+        output = self.working_dir / "outline-only-output.docx"
+        document = Document()
+        expected = []
+        for level in range(9):
+            for explicit_normal in (False, True):
+                text = "大纲%d级-%s" % (level + 1, explicit_normal)
+                paragraph = document.add_paragraph(text)
+                if explicit_normal:
+                    _set_explicit_normal_style(paragraph)
+                _set_direct_outline(paragraph, level)
+                expected.append((text, level))
+        overridden = document.add_paragraph("直接大纲优先", style="Heading 1")
+        _set_direct_outline(overridden, 2)
+        expected.append(("直接大纲优先", 2))
+        document.add_paragraph("普通正文和数字 1.2 保留。")
+        document.save(target)
+
+        _manifest, stats = manager.apply_style_pack(self.pack, target, output)
+        entries = read_zip(output)
+        root = xml(entries, "word/document.xml")
+        catalog = core.build_style_catalog(entries["word/styles.xml"], entries["word/document.xml"])
+        self.assertEqual(
+            root.xpath("//w:t/text()", namespaces=NS),
+            xml(read_zip(target), "word/document.xml").xpath("//w:t/text()", namespaces=NS),
+        )
+        for text, level in expected:
+            paragraph = paragraph_for_text(root, text)
+            style_id = paragraph_style(paragraph)
+            self.assertEqual(style_id, "Heading%d" % (level + 1))
+            self.assertEqual(catalog.resolved_outline[style_id], level)
+            self.assertEqual(direct_numbering(paragraph)[1], level)
+            self.assertIsNone(paragraph.find("w:pPr/w:outlineLvl", namespaces=NS))
+        self.assertEqual(stats.heading_numbers_applied, len(expected))
+
+    def test_body_outline_nine_and_invalid_values_do_not_become_headings(self) -> None:
+        target = self.working_dir / "body-outline-target.docx"
+        output = self.working_dir / "body-outline-output.docx"
+        document = Document()
+        texts = []
+        for style_name in (None, "Normal", "Heading 1"):
+            text = "正文大纲9-%s" % style_name
+            paragraph = document.add_paragraph(text, style=style_name)
+            if style_name == "Normal":
+                _set_explicit_normal_style(paragraph)
+            _set_direct_outline(paragraph, 9)
+            texts.append(text)
+        for value in (-1, 10, "invalid"):
+            text = "非法大纲-%s" % value
+            paragraph = document.add_paragraph(text)
+            _set_direct_outline(paragraph, value)
+            texts.append(text)
+        visual = document.add_paragraph("只有加粗外观的正文")
+        visual.runs[0].bold = True
+        texts.append(visual.text)
+        document.save(target)
+
+        _manifest, stats = manager.apply_style_pack(
+            self.pack, target, output, demote_headings=True
+        )
+        entries = read_zip(output)
+        root = xml(entries, "word/document.xml")
+        catalog = core.build_style_catalog(entries["word/styles.xml"], entries["word/document.xml"])
+        self.assertEqual(root.xpath("//w:t/text()", namespaces=NS), texts)
+        for text in texts:
+            paragraph = paragraph_for_text(root, text)
+            style = paragraph.find("w:pPr/w:pStyle", namespaces=NS)
+            style_id = str(style.get(qn("val"))) if style is not None else catalog.fallback("paragraph")
+            self.assertIsNone(catalog.resolved_outline.get(style_id))
+            self.assertIsNone(paragraph.find("w:pPr/w:numPr", namespaces=NS))
+        self.assertEqual(stats.heading_numbers_applied, 0)
+        self.assertEqual(stats.heading_levels_demoted, 0)
+
+    def test_explicit_body_outline_wins_over_same_id_source_heading(self) -> None:
+        source = self.working_dir / "same-id-heading-source.docx"
+        target = self.working_dir / "same-id-body-target.docx"
+        pack = self.working_dir / "same-id-body.wfstyle"
+        output = self.working_dir / "same-id-body-output.docx"
+        document = Document()
+        style = document.styles.add_style("ClauseBody", 1)
+        outline = OxmlElement("w:outlineLvl")
+        outline.set(docx_qn("w:val"), "0")
+        style._element.get_or_add_pPr().append(outline)
+        document.add_paragraph("模板正式一级标题", style="ClauseBody")
+        document.save(source)
+        document = Document()
+        document.styles.add_style("ClauseBody", 1)
+        paragraph = document.add_paragraph("明确正文，不得提升成标题", style="ClauseBody")
+        _set_direct_outline(paragraph, 9)
+        document.save(target)
+        manager.create_style_pack(source, pack)
+        _manifest, report = manager.preflight_style_pack(pack, target)
+        self.assertEqual(report["heading_level_counts"], {})
+        _manifest, stats = manager.apply_style_pack(pack, target, output)
+        entries = read_zip(output)
+        root = xml(entries, "word/document.xml")
+        paragraph = paragraph_for_text(root, "明确正文，不得提升成标题")
+        catalog = core.build_style_catalog(entries["word/styles.xml"], entries["word/document.xml"])
+        self.assertIsNone(core.paragraph_outline_level(paragraph.find("w:pPr", namespaces=NS), catalog))
+        self.assertEqual(paragraph.xpath("w:pPr/w:outlineLvl/@w:val", namespaces=NS), ["9"])
+        self.assertEqual(stats.heading_numbers_applied, 0)
+
+    def test_outline_demotion_happens_once_and_headers_keep_their_level(self) -> None:
+        target = self.working_dir / "outline-scope-target.docx"
+        output = self.working_dir / "outline-scope-output.docx"
+        document = Document()
+        body = document.add_paragraph("正文大纲二级")
+        _set_direct_outline(body, 1)
+        deepest = document.add_paragraph("大纲九级边界")
+        _set_direct_outline(deepest, 8)
+        table = document.add_table(rows=1, cols=1)
+        table.style = "Table Grid"
+        table_paragraph = table.cell(0, 0).paragraphs[0]
+        table_paragraph.text = "表格大纲二级"
+        _set_direct_outline(table_paragraph, 1)
+        table_paragraph.paragraph_format.space_before = Pt(13)
+        header = document.sections[0].header.paragraphs[0]
+        header.text = "页眉大纲二级"
+        _set_direct_outline(header, 1)
+        document.save(target)
+
+        _manifest, stats = manager.apply_style_pack(
+            self.pack, target, output, demote_headings=True
+        )
+        entries = read_zip(output)
+        root = xml(entries, "word/document.xml")
+        for text in ("正文大纲二级", "表格大纲二级"):
+            paragraph = paragraph_for_text(root, text)
+            self.assertEqual(paragraph_style(paragraph), "Heading3")
+            self.assertEqual(direct_numbering(paragraph)[1], 2)
+            self.assertIsNone(paragraph.find("w:pPr/w:outlineLvl", namespaces=NS))
+        table_paragraph = paragraph_for_text(root, "表格大纲二级")
+        self.assertEqual(
+            table_paragraph.find("w:pPr/w:spacing", namespaces=NS).get(qn("before")),
+            "260",
+        )
+        self.assertEqual(len(root.xpath("//w:tbl", namespaces=NS)), 1)
+        original_root = xml(read_zip(target), "word/document.xml")
+        self.assertEqual(
+            [etree.tostring(node, method="c14n", exclusive=True) for node in root.xpath("//w:tblPr", namespaces=NS)],
+            [etree.tostring(node, method="c14n", exclusive=True) for node in original_root.xpath("//w:tblPr", namespaces=NS)],
+        )
+        deepest_paragraph = paragraph_for_text(root, "大纲九级边界")
+        self.assertEqual(paragraph_style(deepest_paragraph), "Heading9")
+        self.assertEqual(direct_numbering(deepest_paragraph)[1], 8)
+        header_name = next(name for name in entries if name.startswith("word/header") and name.endswith(".xml"))
+        header_paragraph = paragraph_for_text(xml(entries, header_name), "页眉大纲二级")
+        self.assertEqual(paragraph_style(header_paragraph), "Heading2")
+        self.assertEqual(direct_numbering(header_paragraph)[1], 1)
+        self.assertEqual(stats.heading_levels_demoted, 2)
+        self.assertEqual(stats.heading_level9_unchanged, 1)
+
+    def test_direct_outline_uses_custom_source_heading_authority(self) -> None:
+        target = self.working_dir / "custom-authority-outline-target.docx"
+        output = self.working_dir / "custom-authority-outline-output.docx"
+        pack = self.working_dir / "custom-outline.wfstyle"
+        document = Document()
+        _set_direct_outline(document.add_paragraph("自定义模板大纲标题"), 0)
+        document.save(target)
+        manager.create_style_pack(TEST_DIR / "fixtures" / "source-custom-outline-numbered.docx", pack)
+
+        source = TEST_DIR / "fixtures" / "source-custom-outline-numbered.docx"
+        for method in ("pack", "direct"):
+            with self.subTest(method=method):
+                output = self.working_dir / ("custom-outline-%s.docx" % method)
+                if method == "pack":
+                    manager.apply_style_pack(pack, target, output)
+                else:
+                    core.transfer(source, target, output)
+                paragraph = paragraph_for_text(
+                    xml(read_zip(output), "word/document.xml"),
+                    "自定义模板大纲标题",
+                )
+                self.assertEqual(paragraph_style(paragraph), "CustomOutlineOne")
+                self.assertEqual(direct_numbering(paragraph)[1], 0)
+
+    def test_direct_transfer_outline_matrix_demotion_and_story_scope(self) -> None:
+        target = self.working_dir / "direct-outline-matrix.docx"
+        document = Document()
+        expected = []
+        for level in range(9):
+            for explicit_normal in (False, True):
+                text = "直接迁移大纲%d-%s" % (level, explicit_normal)
+                paragraph = document.add_paragraph(text)
+                if explicit_normal:
+                    _set_explicit_normal_style(paragraph)
+                _set_direct_outline(paragraph, level)
+                expected.append((text, level))
+        invalid_styles = []
+        for value in (-1, 10, "invalid", ""):
+            body = document.add_paragraph("非法正文大纲-%s" % value)
+            _set_direct_outline(body, value)
+            inherited = document.add_paragraph(
+                "非法大纲继承标题-%s" % value, style="Heading 1"
+            )
+            _set_direct_outline(inherited, value)
+            invalid_styles.append(body.text)
+            expected.append((inherited.text, 0))
+        for style_name in (None, "Normal", "Heading 1"):
+            body = document.add_paragraph("直接正文9-%s" % style_name, style=style_name)
+            if style_name == "Normal":
+                _set_explicit_normal_style(body)
+            _set_direct_outline(body, 9)
+            invalid_styles.append(body.text)
+        table = document.add_table(rows=1, cols=1)
+        table.style = "Table Grid"
+        cell = table.cell(0, 0).paragraphs[0]
+        cell.text = "直接表格大纲二级"
+        _set_explicit_normal_style(cell)
+        _set_direct_outline(cell, 1)
+        cell.paragraph_format.space_before = Pt(13)
+        expected.append((cell.text, 1))
+        header = document.sections[0].header.paragraphs[0]
+        header.text = "直接页眉大纲二级"
+        _set_explicit_normal_style(header)
+        _set_direct_outline(header, 1)
+        document.save(target)
+        original_entries = read_zip(target)
+        original_root = xml(original_entries, "word/document.xml")
+        original_text = original_root.xpath("//w:t/text()", namespaces=NS)
+        original_table_properties = [
+            etree.tostring(node, method="c14n", exclusive=True)
+            for node in original_root.xpath("//w:tblPr", namespaces=NS)
+        ]
+
+        for demote in (False, True):
+            with self.subTest(demote=demote):
+                output = self.working_dir / ("direct-outline-matrix-%s.docx" % demote)
+                stats = core.transfer(self.source, target, output, demote_headings=demote)
+                entries = read_zip(output)
+                root = xml(entries, "word/document.xml")
+                catalog = core.build_style_catalog(entries["word/styles.xml"], entries["word/document.xml"])
+                self.assertEqual(root.xpath("//w:t/text()", namespaces=NS), original_text)
+                for text, level in expected:
+                    paragraph = paragraph_for_text(root, text)
+                    mapped_level = min(8, level + int(demote))
+                    self.assertEqual(paragraph_style(paragraph), "Heading%d" % (mapped_level + 1))
+                    self.assertEqual(direct_numbering(paragraph)[1], mapped_level)
+                    self.assertIsNone(paragraph.find("w:pPr/w:outlineLvl", namespaces=NS))
+                for text in invalid_styles:
+                    paragraph = paragraph_for_text(root, text)
+                    style = paragraph.find("w:pPr/w:pStyle", namespaces=NS)
+                    style_id = str(style.get(qn("val"))) if style is not None else catalog.fallback("paragraph")
+                    self.assertIsNone(catalog.resolved_outline.get(style_id))
+                    self.assertIsNone(paragraph.find("w:pPr/w:numPr", namespaces=NS))
+                header_name = next(name for name in entries if name.startswith("word/header") and name.endswith(".xml"))
+                header_paragraph = paragraph_for_text(xml(entries, header_name), header.text)
+                self.assertEqual(paragraph_style(header_paragraph), "Heading2")
+                self.assertEqual(direct_numbering(header_paragraph)[1], 1)
+                self.assertEqual(
+                    [etree.tostring(node, method="c14n", exclusive=True) for node in root.xpath("//w:tblPr", namespaces=NS)],
+                    original_table_properties,
+                )
+                self.assertEqual(
+                    paragraph_for_text(root, cell.text).find("w:pPr/w:spacing", namespaces=NS).get(qn("before")),
+                    "260",
+                )
+                self.assertEqual(stats.heading_levels_demoted, 21 if demote else 0)
+                self.assertEqual(stats.heading_level9_unchanged, 2 if demote else 0)
+
+    def test_direct_outline_demotion_completes_missing_source_level(self) -> None:
+        source = self.working_dir / "outline-three-level-source.docx"
+        pack = self.working_dir / "outline-three-level.wfstyle"
+        target = self.working_dir / "outline-five-target.docx"
+        output = self.working_dir / "outline-five-demoted.docx"
+        _make_three_level_numbered_source(source)
+        manager.create_style_pack(source, pack)
+        document = Document()
+        _set_direct_outline(document.add_paragraph("大纲五级需补全六级"), 4)
+        document.save(target)
+
+        _manifest, stats = manager.apply_style_pack(pack, target, output, demote_headings=True)
+        entries = read_zip(output)
+        paragraph = paragraph_for_text(xml(entries, "word/document.xml"), "大纲五级需补全六级")
+        self.assertEqual(paragraph_style(paragraph), "Heading6")
+        self.assertEqual(direct_numbering(paragraph)[1], 5)
+        self.assertEqual(stats.heading_levels_demoted, 1)
+
+        direct_output = self.working_dir / "outline-five-direct-demoted.docx"
+        direct_stats = core.transfer(source, target, direct_output, demote_headings=True)
+        direct_paragraph = paragraph_for_text(
+            xml(read_zip(direct_output), "word/document.xml"), "大纲五级需补全六级"
+        )
+        self.assertEqual(paragraph_style(direct_paragraph), "Heading6")
+        self.assertEqual(direct_numbering(direct_paragraph)[1], 5)
+        self.assertEqual(direct_stats.heading_levels_demoted, 1)
 
 
 if __name__ == "__main__":

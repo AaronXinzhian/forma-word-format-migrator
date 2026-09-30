@@ -1,8 +1,34 @@
+/**
+ * [INPUT]: 依赖 AppKit, UniformTypeIdentifiers
+ * [OUTPUT]: 提供 FilePanels
+ * [POS]: Word 与格式方案导入导出文件面板、另存输出及拖放路径解析
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 import AppKit
 import UniformTypeIdentifiers
 
 /// 三个文件面板的唯一定义处，避免同一个对话框在多个视图里各写一份标题。
 enum FilePanels {
+    static func choosePack() -> URL? {
+        let panel = NSOpenPanel()
+        panel.title = "导入格式方案"
+        panel.prompt = "导入"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = contentTypes(["wfstyle"])
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    static func exportDestination(for pack: PackManifest) -> URL? {
+        let panel = NSSavePanel()
+        panel.title = "导出格式方案用于备份或分享"
+        panel.prompt = "导出"
+        panel.allowedContentTypes = contentTypes(["wfstyle"])
+        panel.canCreateDirectories = true
+        let safeName = pack.name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+        panel.nameFieldStringValue = safeName + ".wfstyle"
+        return panel.runModal() == .OK ? panel.url : nil
+    }
     static func chooseSource() -> URL? {
         let panel = NSOpenPanel()
         panel.title = UIStrings.FilePicker.sourceTitle

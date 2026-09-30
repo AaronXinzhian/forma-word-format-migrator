@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 System.Diagnostics, FormaFushi.Windows.Generated
+ * [OUTPUT]: 提供 MainForm
+ * [POS]: 协调 Windows 格式库读取、保存、删除和应用
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 using System.Diagnostics;
 using FormaFushi.Windows.Generated;
 

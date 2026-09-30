@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 System.Text, FormaFushi.Windows.Generated
+ * [OUTPUT]: 提供 MainForm
+ * [POS]: 创建 Windows 三步流程控件和布局
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 using System.Text;
 using FormaFushi.Windows.Generated;
 

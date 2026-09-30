@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 System.ComponentModel, System.Drawing.Drawing2D
+ * [OUTPUT]: 提供 Theme, CardPanel
+ * [POS]: 提供 Windows 统一视觉样式与卡片
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 using System.ComponentModel;
 using System.Drawing.Drawing2D;
 

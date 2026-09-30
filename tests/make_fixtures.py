@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""
+[INPUT]: 依赖 pathlib, zipfile, docx, docx.enum.section, docx.enum.style, docx.enum.table, docx.enum.text, docx.oxml, docx.oxml.ns, docx.shared, lxml, PIL
+[OUTPUT]: 提供 ROOT, FIXTURES, set_cell_shading(), set_table_borders(), set_table_cell_margins(), set_cell_margins(), set_row_height(), set_default_table_style(), append_styles_extension(), set_paragraph_border(), set_style_font(), set_style_outline_level(), set_direct_paragraph_numbering(), set_style_numbering(), add_heading_multilevel_numbering(), add_single_level_numbering(), add_numbering_style_proxy(), mirror_numbering_to_styles_with_effects(), mirror_heading_numbering_to_styles_with_effects(), add_hyperlink(), make_source(), make_target(), format_heading_source_styles(), make_three_level_heading_logic_source(), make_rich_numbering_format_source(), make_multi_numid_heading_source(), make_manual_heading_prefix_target(), make_five_level_heading_target(), make_heading_numbering_source(), make_direct_heading_numbering_source(), make_custom_outline_numbering_source(), make_explicitly_cancelled_heading_source(), make_num_style_link_heading_source(), make_plain_heading_target()
+[POS]: 生成含标题编号、字体、表格和内容语义的回归样本
+[PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+"""
 from pathlib import Path
 import zipfile
 

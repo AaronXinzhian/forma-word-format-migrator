@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, json, shutil, sys, tempfile, unittest, zipfile, pathlib, lxml, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, W_NS, R_NS, NS, qn(), read_zip(), xml(), paragraph_for_text(), numbering_definition(), StylePackTests, PackNamingTests
+# [POS]: 验证格式包创建、应用、隐私白名单与命名
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Regression tests for persistent, privacy-safe Word style packs."""
 
 from __future__ import annotations
@@ -49,6 +53,27 @@ def paragraph_for_text(root: etree._Element, text: str) -> etree._Element:
     raise AssertionError("paragraph not found: %s" % text)
 
 
+def numbering_definition(
+    root: etree._Element, num_id: str
+) -> tuple[etree._Element, etree._Element]:
+    concrete = root.xpath(
+        "./w:num[@w:numId=$num_id]", namespaces=NS, num_id=num_id
+    )
+    if len(concrete) != 1:
+        raise AssertionError("numId does not resolve: %s" % num_id)
+    abstract_id = concrete[0].xpath(
+        "string(w:abstractNumId/@w:val)", namespaces=NS
+    )
+    abstract = root.xpath(
+        "./w:abstractNum[@w:abstractNumId=$abstract_id]",
+        namespaces=NS,
+        abstract_id=abstract_id,
+    )
+    if len(abstract) != 1:
+        raise AssertionError("abstractNum does not resolve: %s" % abstract_id)
+    return concrete[0], abstract[0]
+
+
 class StylePackTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -84,6 +109,19 @@ class StylePackTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls._temporary.cleanup()
+
+    def test_default_display_name_is_marked_as_source_derived(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="default-pack-name-") as root:
+            default_pack = Path(root) / "default-name.wfstyle"
+            created = manager.create_style_pack(
+                FIXTURES / "source.docx",
+                default_pack,
+            )
+            self.assertEqual(created["name"], "source")
+            self.assertIs(
+                created["privacy"]["display_name_derived_from_source"],
+                True,
+            )
 
     def test_only_actually_used_styles_are_exposed(self) -> None:
         formats = self.manifest["used_formats"]
@@ -146,8 +184,8 @@ class StylePackTests(unittest.TestCase):
             self.assertEqual(preview["color_hex"], color)
             self.assertEqual(preview["outline_level"], outline)
             self.assertIs(preview["bold"], True)
-            self.assertEqual(preview["font_latin"], "Arial")
-            self.assertEqual(preview["font_east_asia"], "Hiragino Sans GB")
+            self.assertEqual(preview["font_latin"], "Calibri")
+            self.assertEqual(preview["font_east_asia"], "ＭＳ ゴシック")
 
         self.assertEqual(by_id["Normal"]["size_pt"], 11.0)
         self.assertEqual(by_id["Normal"]["color_hex"], "222222")
@@ -251,17 +289,33 @@ class StylePackTests(unittest.TestCase):
             etree.tostring(etree.fromstring(output["word/styles.xml"])),
             etree.tostring(etree.fromstring(packed["word/styles.xml"])),
         )
-        for name in (
-            "word/theme/theme1.xml",
-            "word/fontTable.xml",
-            "word/numbering.xml",
-        ):
+        for name in ("word/theme/theme1.xml", "word/fontTable.xml"):
             self.assertIn(name, packed)
             # Repackaging may normalize harmless trailing XML whitespace.
             self.assertEqual(
                 etree.tostring(etree.fromstring(output[name])),
                 etree.tostring(etree.fromstring(packed[name])),
                 name,
+            )
+        packed_numbering = xml(packed, "word/numbering.xml")
+        output_numbering = xml(output, "word/numbering.xml")
+        for node in packed_numbering:
+            local = etree.QName(node).localname
+            attribute = {
+                "abstractNum": "abstractNumId",
+                "num": "numId",
+            }.get(local)
+            if attribute is None:
+                continue
+            identifier = node.get(qn(attribute))
+            matches = output_numbering.xpath(
+                "./w:%s[@w:%s=$identifier]" % (local, attribute),
+                namespaces=NS,
+                identifier=identifier,
+            )
+            self.assertEqual(len(matches), 1, (local, identifier))
+            self.assertEqual(
+                etree.tostring(matches[0]), etree.tostring(node), identifier
             )
 
         source_doc = xml(source, "word/document.xml")
@@ -320,7 +374,7 @@ class StylePackTests(unittest.TestCase):
             for ppr in root.xpath("//w:p/w:pPr", namespaces=NS):
                 self.assertTrue(
                     {etree.QName(node).localname for node in ppr}.issubset(
-                        {"pStyle", "sectPr"}
+                        {"pStyle", "sectPr", "numPr"}
                     ),
                     name,
                 )
@@ -331,11 +385,21 @@ class StylePackTests(unittest.TestCase):
                     ),
                     name,
                 )
-            self.assertFalse(root.xpath("//w:numPr", namespaces=NS), name)
             self.assertFalse(root.xpath("//w:tcPr/w:shd", namespaces=NS), name)
             self.assertFalse(
                 root.xpath("//w:tblPr/w:tblBorders", namespaces=NS), name
             )
+
+        document = xml(self.output_entries, "word/document.xml")
+        list_paragraph = paragraph_for_text(document, "目标编号列表项目")
+        num_ids = list_paragraph.xpath(
+            "w:pPr/w:numPr/w:numId/@w:val", namespaces=NS
+        )
+        self.assertEqual(len(num_ids), 1)
+        numbering_definition(
+            xml(self.output_entries, "word/numbering.xml"), str(num_ids[0])
+        )
+        self.assertEqual(self.stats.style_list_paragraphs_materialized, 1)
 
     def test_list_library_returns_valid_pack(self) -> None:
         result = manager.list_library(self.library_dir)

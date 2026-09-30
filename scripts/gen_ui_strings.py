@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, argparse, json, re, sys, pathlib
+# [OUTPUT]: 提供 REPO_ROOT, SOURCE, SWIFT_OUTPUT, CSHARP_OUTPUT, PLACEHOLDER, PLATFORM_KEYS, BANNER, GeneratorError, load_catalog(), is_platform_variant(), resolve(), placeholders(), validate(), split_template(), literal(), expression(), pascal(), camel(), render_swift(), render_csharp(), main()
+# [POS]: 从共享文案源生成两平台类型安全常量
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """从 shared/ui-strings.json 生成两端的界面文案常量。
 
     python3 scripts/gen_ui_strings.py            # 写入生成物

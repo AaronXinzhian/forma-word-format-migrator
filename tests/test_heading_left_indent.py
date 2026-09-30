@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, copy, json, sys, tempfile, unittest, zipfile, pathlib, typing, lxml, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, FIXTURES, NS, HEADING_TEXT, HEADING_STYLE_ID, REPORTED_LEFT_TWIPS, ABSENT_DIRECT_INDENT_CASES, qn(), read_zip(), write_zip(), remove_manifest_fields_from_pack(), xml(), style_for_id(), paragraph_for_text(), effective_style_left(), paragraph_numbering_reference(), active_numbering_level(), effective_word_left(), canonical(), make_reported_source(), HeadingLeftIndentTests
+# [POS]: 验证模板标题段落缩进与编号定位的独立保真
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Regression coverage for numbered headings gaining a list-level left indent.
 
 The source of the reported 0.49-inch value is not the Heading 3 paragraph
@@ -60,17 +64,18 @@ def write_zip(path: Path, entries: Dict[str, bytes]) -> None:
             archive.writestr(name, data)
 
 
-def remove_manifest_field_from_pack(
-    source_pack: Path, legacy_pack: Path, field_name: str
+def remove_manifest_fields_from_pack(
+    source_pack: Path, legacy_pack: Path, field_names: Tuple[str, ...]
 ) -> Dict[str, object]:
     """Clone a valid pack while simulating a manifest from an older release."""
     with zipfile.ZipFile(source_pack, "r") as archive:
         members = {name: archive.read(name) for name in archive.namelist()}
 
     manifest = json.loads(members["manifest.json"].decode("utf-8"))
-    if field_name not in manifest:
-        raise AssertionError("new pack did not contain field: %s" % field_name)
-    manifest.pop(field_name)
+    for field_name in field_names:
+        if field_name not in manifest:
+            raise AssertionError("new pack did not contain field: %s" % field_name)
+        manifest.pop(field_name)
     members["manifest.json"] = json.dumps(
         manifest,
         ensure_ascii=False,
@@ -534,14 +539,19 @@ class HeadingLeftIndentTests(unittest.TestCase):
     ) -> None:
         legacy_pack = self.working_dir / "legacy-heading-left-zero.wfstyle"
         legacy_output = self.working_dir / "legacy-output.docx"
-        legacy_manifest = remove_manifest_field_from_pack(
+        legacy_manifest = remove_manifest_fields_from_pack(
             self.pack,
             legacy_pack,
-            "heading_paragraph_indents",
+            (
+                "heading_paragraph_properties",
+                "heading_paragraph_indents",
+            ),
         )
+        self.assertNotIn("heading_paragraph_properties", legacy_manifest)
         self.assertNotIn("heading_paragraph_indents", legacy_manifest)
 
         loaded_manifest, _entries = manager.load_style_pack(legacy_pack)
+        self.assertNotIn("heading_paragraph_properties", loaded_manifest)
         self.assertNotIn("heading_paragraph_indents", loaded_manifest)
         _manifest, stats = manager.apply_style_pack(
             legacy_pack,

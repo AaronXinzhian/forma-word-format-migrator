@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 SwiftUI
+ * [OUTPUT]: 提供 Palette, Color, AppCard, PrimaryButtonStyle, SecondaryButtonStyle
+ * [POS]: Mac 全局色板、卡片及主次按钮样式的统一定义
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 import SwiftUI
 
 enum Palette {
@@ -89,9 +95,4 @@ struct SecondaryButtonStyle: ButtonStyle {
                     .stroke(Palette.line, lineWidth: 1)
             }
     }
-}
-
-func number(_ value: Double) -> String {
-    if value.rounded() == value { return String(Int(value)) }
-    return String(format: "%.1f", value)
 }

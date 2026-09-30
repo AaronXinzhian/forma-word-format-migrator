@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 SwiftUI
+ * [OUTPUT]: 提供 LibrarySidebar
+ * [POS]: 常驻格式库选择与删除、方案导入导出及损坏原因定位界面
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 import SwiftUI
 
 /// 常驻格式库侧边栏。
@@ -7,6 +13,7 @@ import SwiftUI
 struct LibrarySidebar: View {
     @ObservedObject var model: WordFormatLibraryModel
     @State private var packPendingDeletion: PackManifest?
+    @State private var isShowingReadErrors = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -34,6 +41,18 @@ struct LibrarySidebar: View {
             .padding(.top, 16)
 
             HStack {
+                Button("导入方案") {
+                    if let url = FilePanels.choosePack() { Task { await model.importPack(url) } }
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isBusy)
+                Button("导出方案") {
+                    if let pack = model.selectedPack, let url = FilePanels.exportDestination(for: pack) {
+                        Task { await model.exportPack(pack, to: url) }
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isBusy || model.selectedPack == nil)
                 Spacer()
                 Button {
                     Task { await model.reloadLibrary() }
@@ -55,6 +74,11 @@ struct LibrarySidebar: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 22)
                     .padding(.top, 12)
+                Button("查看原因与定位文件") { isShowingReadErrors = true }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11))
+                    .padding(.horizontal, 22)
+                    .padding(.top, 4)
             }
 
             if model.packs.isEmpty {
@@ -92,6 +116,26 @@ struct LibrarySidebar: View {
                 .opacity(model.isLibraryHighlighted ? 1 : 0)
         }
         .animation(.easeInOut(duration: 0.25), value: model.isLibraryHighlighted)
+        .sheet(isPresented: $isShowingReadErrors) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("无法读取的格式方案").font(.headline)
+                ScrollView {
+                    ForEach(model.libraryReadErrors) { issue in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(URL(fileURLWithPath: issue.path).lastPathComponent).fontWeight(.semibold)
+                            Text(issue.error).textSelection(.enabled)
+                            Button("在 Finder 中显示") {
+                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: issue.path)])
+                            }
+                            Divider()
+                        }
+                    }
+                }
+                HStack { Spacer(); Button("完成") { isShowingReadErrors = false }.keyboardShortcut(.defaultAction) }
+            }
+            .padding(24)
+            .frame(width: 580, height: 430)
+        }
         .alert(item: $packPendingDeletion) { pack in
             Alert(
                 title: Text(UIStrings.Deletion.confirmTitle(name: pack.name)),
@@ -134,6 +178,7 @@ private struct SidebarPackCard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
 
             Button(role: .destructive, action: deleteAction) {
                 Text(UIStrings.Sidebar.deleteButton)

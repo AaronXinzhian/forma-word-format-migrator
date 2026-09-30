@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 Foundation
+ * [OUTPUT]: 提供 LibraryLocationTests
+ * [POS]: 验证旧格式库位置迁移、冲突保护与失败回退
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 import Foundation
 
 // 2.6 把 macOS 的格式库目录从 WordFormatMigrator 改名成 FormaFushi。

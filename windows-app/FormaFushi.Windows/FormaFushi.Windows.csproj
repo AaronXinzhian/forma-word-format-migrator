@@ -12,9 +12,9 @@
     <Description>Forma 赋式｜Word 文档格式引擎</Description>
     <Company>Forma</Company>
     <Copyright>Copyright © 2026</Copyright>
-    <Version>2.7.0</Version>
-    <FileVersion>2.7.0.0</FileVersion>
-    <AssemblyVersion>2.7.0.0</AssemblyVersion>
+    <Version>2.7.3</Version>
+    <FileVersion>2.7.3.0</FileVersion>
+    <AssemblyVersion>2.7.3.0</AssemblyVersion>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationIcon>Assets\FormaFushi.ico</ApplicationIcon>
     <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>

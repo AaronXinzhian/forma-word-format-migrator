@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 FormaFushi.Windows.Generated, Microsoft.VisualBasic.FileIO
+ * [OUTPUT]: 提供 PackDeletionPolicy
+ * [POS]: 验证格式库文件身份并限制回收站删除范围
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 using FormaFushi.Windows.Generated;
 using Microsoft.VisualBasic.FileIO;
 

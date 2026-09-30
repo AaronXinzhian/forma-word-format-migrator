@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [INPUT]: 依赖 __future__, hashlib, json, sys, tempfile, unittest, zipfile, pathlib, typing, lxml, make_fixtures, style_pack_manager, word_style_transfer
+# [OUTPUT]: 提供 TEST_DIR, PROJECT_DIR, NS, qn(), read_zip(), xml(), style_for_id(), active_numbering_levels(), style_num_id(), paragraph_for_text_fragment(), canonical(), child_value(), geometry(), NumberingFormatFidelityTests, SharedNumberLabelFontTests, MultiNumIdAndManualPrefixTests
+# [POS]: 验证编号字体、标点、几何和手工前缀保真
+# [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
 """Regression tests for exact heading-number label format migration."""
 
 from __future__ import annotations

@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 SwiftUI, UniformTypeIdentifiers
+ * [OUTPUT]: 提供 ImportStepView
+ * [POS]: 首次导入 Word 模板与文档拖放的引导页面
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 import SwiftUI
 import UniformTypeIdentifiers
 

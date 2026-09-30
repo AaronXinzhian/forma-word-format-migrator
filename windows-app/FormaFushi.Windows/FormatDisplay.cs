@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 System.Globalization, FormaFushi.Windows.Generated
+ * [OUTPUT]: 提供 FormatDisplay, ApplyNotes
+ * [POS]: 生成格式属性及应用说明的 Windows 展示文案
+ * [PROTOCOL]: 变更时更新此头部,然后检查上级 FOLDER_INDEX.md
+ */
 using System.Globalization;
 using FormaFushi.Windows.Generated;
 
